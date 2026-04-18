@@ -1,11 +1,10 @@
--- Ascend Deals Instagram Publisher — Neon Postgres Schema
--- Run this against your Neon database before deploying.
-
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 CREATE TABLE IF NOT EXISTS posts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   media_url TEXT NOT NULL,
+  thumbnail_url TEXT,
+  media_type TEXT DEFAULT 'IMAGE',
   caption TEXT,
   status TEXT DEFAULT 'pending',
   scheduled_at TIMESTAMP,
@@ -26,6 +25,5 @@ CREATE TABLE IF NOT EXISTS settings (
   updated_at TIMESTAMP DEFAULT NOW()
 );
 
--- Default daily limit
 INSERT INTO settings (key, value) VALUES ('daily_limit', '25')
 ON CONFLICT (key) DO NOTHING;

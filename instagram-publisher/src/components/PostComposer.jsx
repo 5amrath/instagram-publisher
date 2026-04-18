@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useMemo } from 'react';
 import { useDropzone } from 'react-dropzone';
 import axios from 'axios';
 
@@ -8,125 +8,161 @@ const MAX_FILES = 1000;
 
 const HASHTAG_PRESETS = [
   { label: 'Deals', tags: '#deals #discount #save #musthave #trending #viral #affiliate' },
-  { label: 'Looksmax', tags: '#looksmaxxing #skincare #glowup #selfcare #grooming #beauty' },
-  { label: 'Tech', tags: '#tech #gadgets #innovation #smart #futuretech #techdeals' },
-  { label: 'Fitness', tags: '#fitness #gym #health #gains #workout #supplements #fitlife' },
-  { label: 'Lifestyle', tags: '#lifestyle #upgrade #quality #essentials #modern #aesthetic' },
+  { label: 'Looksmax', tags: '#looksmaxxing #skincare #glowup #selfcare #grooming #mog' },
+  { label: 'Forward Growth', tags: '#forwardgrowth #maxila #posture #jawline #mewing #mog' },
+  { label: 'Skincare', tags: '#skincare #acnetreatment #clearsky #glowup #routine #bp' },
+  { label: 'Fitness', tags: '#fitness #gym #gains #testosterone #physique #bulk' },
+];
+
+const CAPTION_TEMPLATES = [
+  { label: 'Hook + CTA', text: '' },
+  { label: 'Before/After', text: 'Before vs After. The results speak for themselves.\n\nLink in bio.' },
+  { label: 'Problem/Solution', text: 'You\'ve been doing it wrong this whole time.\n\nHere\'s what actually works.\n\nLink in bio.' },
+  { label: 'Social Proof', text: 'This is why everyone is switching.\n\nDon\'t get left behind.\n\nLink in bio.' },
+  { label: 'Urgency', text: 'This won\'t last long.\n\nGrab it before it\'s gone.\n\nLink in bio.' },
 ];
 
 export default function PostComposer({ showToast }) {
-  // Single post mode
+  const [mode, setMode] = useState('single');
   const [mediaFile, setMediaFile] = useState(null);
   const [mediaPreview, setMediaPreview] = useState(null);
+  const [mediaType, setMediaType] = useState('VIDEO');
   const [caption, setCaption] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadingStep, setLoadingStep] = useState('');
-  const [mediaType, setMediaType] = useState('IMAGE');
-
-  // Bulk mode
-  const [mode, setMode] = useState('single'); // 'single' | 'bulk'
-  const [bulkFiles, setBulkFiles] = useState([]);
-  const [bulkCaption, setBulkCaption] = useState('');
-  const [bulkProgress, setBulkProgress] = useState({ total: 0, uploaded: 0, failed: 0, inProgress: false });
-  const abortRef = useRef(false);
-
-  // AI caption
   const [aiLoading, setAiLoading] = useState(false);
 
-  const onDropSingle = useCallback((acceptedFiles) => {
-    const file = acceptedFiles[0];
+  const [bulkFiles, setBulkFiles] = useState([]);
+  const [bulkCaption, setBulkCaption] = useState('');
+  const [bulkProgress, setBulkProgress] = useState({ total: 0, done: 0, failed: 0, active: false });
+  const abortRef = useRef(false);
+
+  const detectType = (file) => {
+    if (file.type && file.type.startsWith('video/')) return 'VIDEO';
+    const ext = file.name.toLowerCase().split('.').pop();
+    if (['mp4', 'mov', 'avi', 'webm', 'mkv'].includes(ext)) return 'VIDEO';
+    return 'IMAGE';
+  };
+
+  // Caption quality score
+  const captionQuality = useMemo(() => {
+    const c = mode === 'single' ? caption : bulkCaption;
+    if (!c || c.trim().length === 0) return { level: 'none', label: '' };
+    const len = c.trim().length;
+    const hasHashtags = (c.match(/#\w+/g) || []).length;
+    const hasNewlines = c.includes('\n');
+    const hasCTA = /link in bio|check .* out|grab it|shop now|tap link/i.test(c);
+
+    let score = 0;
+    if (len > 20) score++;
+    if (len > 60) score++;
+    if (hasHashtags >= 3) score++;
+    if (hasHashtags >= 6) score++;
+    if (hasNewlines) score++;
+    if (hasCTA) score++;
+
+    if (score >= 5) return { level: 'good', label: 'Strong caption' };
+    if (score >= 3) return { level: 'ok', label: 'Could be stronger' };
+    return { level: 'weak', label: 'Add more hooks/hashtags' };
+  }, [caption, bulkCaption, mode]);
+
+  const onDropSingle = useCallback((files) => {
+    const file = files[0];
     if (!file) return;
-    const isVideo = file.type.startsWith('video/');
-    setMediaType(isVideo ? 'VIDEO' : 'IMAGE');
+    setMediaType(detectType(file));
     setMediaFile(file);
     setMediaPreview(URL.createObjectURL(file));
   }, []);
 
-  const onDropBulk = useCallback((acceptedFiles) => {
-    const limited = acceptedFiles.slice(0, MAX_FILES);
-    setBulkFiles(prev => {
-      const combined = [...prev, ...limited].slice(0, MAX_FILES);
-      return combined;
-    });
+  const onDropBulk = useCallback((files) => {
+    setBulkFiles((prev) => [...prev, ...files].slice(0, MAX_FILES));
   }, []);
 
-  const { getRootProps: getSingleRootProps, getInputProps: getSingleInputProps, isDragActive: isSingleDrag } = useDropzone({
+  const singleDrop = useDropzone({
     onDrop: onDropSingle,
-    accept: { 'image/*': ['.jpg', '.jpeg', '.png', '.webp'], 'video/*': ['.mp4', '.mov'] },
-    maxFiles: 1,
-    maxSize: 100 * 1024 * 1024,
-    disabled: mode !== 'single',
+    accept: { 'image/*': ['.jpg', '.jpeg', '.png', '.webp'], 'video/*': ['.mp4', '.mov', '.avi', '.webm'] },
+    maxFiles: 1, maxSize: 500 * 1024 * 1024, disabled: mode !== 'single',
   });
 
-  const { getRootProps: getBulkRootProps, getInputProps: getBulkInputProps, isDragActive: isBulkDrag } = useDropzone({
+  const bulkDrop = useDropzone({
     onDrop: onDropBulk,
-    accept: { 'image/*': ['.jpg', '.jpeg', '.png', '.webp'] },
-    maxFiles: MAX_FILES,
-    maxSize: 100 * 1024 * 1024,
-    disabled: mode !== 'bulk',
-    multiple: true,
+    accept: { 'image/*': ['.jpg', '.jpeg', '.png', '.webp'], 'video/*': ['.mp4', '.mov', '.avi', '.webm'] },
+    maxFiles: MAX_FILES, maxSize: 500 * 1024 * 1024, disabled: mode !== 'bulk', multiple: true,
   });
 
   const clearMedia = () => {
-    setMediaFile(null);
     if (mediaPreview) URL.revokeObjectURL(mediaPreview);
+    setMediaFile(null);
     setMediaPreview(null);
+    setMediaType('VIDEO');
   };
 
-  const handlePublishSingle = async () => {
-    if (!mediaFile) { showToast('Select an image or video first', 'error'); return; }
+  const uploadFile = async (file) => {
+    const formData = new FormData();
+    formData.append('image', file);
+    const res = await axios.post('/api/upload-media', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 300000,
+    });
+    return res.data;
+  };
+
+  const handlePublishNow = async () => {
+    if (!mediaFile) return showToast('Select a file first', 'error');
     setLoading(true);
     try {
-      setLoadingStep('Uploading media...');
-      const formData = new FormData();
-      formData.append('image', mediaFile);
-      const uploadRes = await axios.post('/api/upload-media', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-      const { url: mediaUrl } = uploadRes.data;
+      setLoadingStep('Uploading to Cloudinary...');
+      const upload = await uploadFile(mediaFile);
 
-      setLoadingStep('Publishing to Instagram...');
+      let finalCaption = caption;
+      if (!finalCaption.trim() && upload.thumbnailUrl) {
+        setLoadingStep('Analyzing first frame with AI...');
+        try {
+          const aiRes = await axios.post('/api/analyze-frame', { imageUrl: upload.thumbnailUrl });
+          finalCaption = aiRes.data.caption || '';
+          if (finalCaption) setCaption(finalCaption);
+        } catch (e) { console.error('Frame analysis failed:', e); }
+      }
+
+      const isVid = upload.mediaType === 'VIDEO';
+      setLoadingStep(isVid ? 'Publishing Reel...' : 'Publishing to Instagram...');
       await axios.post('/api/publish', {
-        mediaUrl,
-        mediaType,
-        caption,
+        mediaUrl: upload.url,
+        videoUrl: upload.videoUrl,
+        mediaType: upload.mediaType,
+        caption: finalCaption,
       });
 
-      showToast('Post published to Instagram', 'success');
+      showToast(isVid ? 'Reel published' : 'Post published', 'success');
       setCaption('');
       clearMedia();
     } catch (err) {
-      const msg = err.response?.data?.error || err.message || 'Something went wrong';
-      showToast(`Failed: ${msg}`, 'error');
+      showToast(`Failed: ${err.response?.data?.error || err.message}`, 'error');
     } finally {
       setLoading(false);
       setLoadingStep('');
     }
   };
 
-  const handleQueueSingle = async () => {
-    if (!mediaFile) { showToast('Select an image or video first', 'error'); return; }
+  const handleAddToQueue = async () => {
+    if (!mediaFile) return showToast('Select a file first', 'error');
     setLoading(true);
     try {
-      setLoadingStep('Uploading media...');
-      const formData = new FormData();
-      formData.append('image', mediaFile);
-      const uploadRes = await axios.post('/api/upload-media', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-
-      setLoadingStep('Saving to queue...');
+      setLoadingStep('Uploading...');
+      const upload = await uploadFile(mediaFile);
+      setLoadingStep('Queuing...');
       await axios.post('/api/save-post', {
-        mediaUrl: uploadRes.data.url,
+        mediaUrl: upload.url,
+        videoUrl: upload.videoUrl,
+        thumbnailUrl: upload.thumbnailUrl,
+        mediaType: upload.mediaType,
         caption,
       });
-
-      showToast('Added to queue — auto-post will handle it', 'success');
+      showToast('Added to queue', 'success');
       setCaption('');
       clearMedia();
     } catch (err) {
-      const msg = err.response?.data?.error || err.message || 'Something went wrong';
-      showToast(`Failed: ${msg}`, 'error');
+      showToast(`Failed: ${err.response?.data?.error || err.message}`, 'error');
     } finally {
       setLoading(false);
       setLoadingStep('');
@@ -134,325 +170,267 @@ export default function PostComposer({ showToast }) {
   };
 
   const handleBulkUpload = async () => {
-    if (bulkFiles.length === 0) { showToast('Add files first', 'error'); return; }
+    if (bulkFiles.length === 0) return showToast('Add files first', 'error');
     abortRef.current = false;
-
     const total = bulkFiles.length;
-    setBulkProgress({ total, uploaded: 0, failed: 0, inProgress: true });
+    let done = 0, failed = 0;
+    setBulkProgress({ total, done: 0, failed: 0, active: true });
 
-    let uploaded = 0;
-    let failed = 0;
     const queue = [...bulkFiles];
-    let activeWorkers = 0;
+    let active = 0;
 
-    const processNext = () => {
-      return new Promise((resolve) => {
-        const checkAndProcess = async () => {
-          while (queue.length > 0 && activeWorkers < MAX_CONCURRENT && !abortRef.current) {
-            const file = queue.shift();
-            activeWorkers++;
+    await new Promise((resolve) => {
+      const next = async () => {
+        while (queue.length > 0 && active < MAX_CONCURRENT && !abortRef.current) {
+          const file = queue.shift();
+          active++;
+          (async () => {
+            try {
+              const upload = await uploadFile(file);
+              await axios.post('/api/save-post', {
+                mediaUrl: upload.url,
+                videoUrl: upload.videoUrl,
+                thumbnailUrl: upload.thumbnailUrl,
+                mediaType: upload.mediaType,
+                caption: bulkCaption,
+              });
+              done++;
+            } catch { failed++; }
+            finally {
+              active--;
+              setBulkProgress({ total, done, failed, active: true });
+              if (queue.length === 0 && active === 0) resolve();
+              else next();
+            }
+          })();
+        }
+        if (queue.length === 0 && active === 0) resolve();
+      };
+      next();
+    });
 
-            (async () => {
-              try {
-                const formData = new FormData();
-                formData.append('image', file);
-                const uploadRes = await axios.post('/api/upload-media', formData, {
-                  headers: { 'Content-Type': 'multipart/form-data' },
-                  timeout: 60000,
-                });
-
-                await axios.post('/api/save-post', {
-                  mediaUrl: uploadRes.data.url,
-                  caption: bulkCaption,
-                });
-
-                uploaded++;
-              } catch (err) {
-                console.error('Bulk upload failed for', file.name, err.message);
-                failed++;
-              } finally {
-                activeWorkers--;
-                setBulkProgress({ total, uploaded, failed, inProgress: true });
-                if (queue.length === 0 && activeWorkers === 0) {
-                  resolve();
-                } else {
-                  checkAndProcess();
-                }
-              }
-            })();
-          }
-
-          if (queue.length === 0 && activeWorkers === 0) {
-            resolve();
-          }
-        };
-
-        checkAndProcess();
-      });
-    };
-
-    await processNext();
-
-    setBulkProgress({ total, uploaded, failed, inProgress: false });
+    setBulkProgress({ total, done, failed, active: false });
     setBulkFiles([]);
-
-    if (abortRef.current) {
-      showToast(`Upload cancelled. ${uploaded} saved, ${failed} failed.`, 'error');
-    } else if (failed > 0) {
-      showToast(`Done: ${uploaded} queued, ${failed} failed`, 'error');
-    } else {
-      showToast(`All ${uploaded} posts queued for auto-posting`, 'success');
-    }
+    if (failed > 0) showToast(`${done} queued, ${failed} failed`, 'error');
+    else showToast(`All ${done} files queued`, 'success');
   };
 
-  const handleAbort = () => {
-    abortRef.current = true;
-  };
-
-  const removeBulkFile = (index) => {
-    setBulkFiles(prev => prev.filter((_, i) => i !== index));
-  };
-
-  const handleGenerateCaption = async () => {
+  const handleAI = async () => {
     setAiLoading(true);
     try {
-      const res = await axios.post('/api/generate-caption', { context: '' });
-      if (mode === 'single') {
-        setCaption(res.data.caption);
-      } else {
-        setBulkCaption(res.data.caption);
-      }
-    } catch (err) {
-      showToast('AI caption failed — try again', 'error');
-    } finally {
-      setAiLoading(false);
-    }
+      const res = await axios.post('/api/generate-caption', {});
+      if (mode === 'single') setCaption(res.data.caption);
+      else setBulkCaption(res.data.caption);
+    } catch { showToast('AI caption failed', 'error'); }
+    finally { setAiLoading(false); }
   };
 
-  const insertHashtags = (preset) => {
-    if (mode === 'single') {
-      const space = caption.endsWith('\n') || caption === '' ? '' : '\n\n';
-      setCaption(prev => prev + space + preset.tags);
-    } else {
-      const space = bulkCaption.endsWith('\n') || bulkCaption === '' ? '' : '\n\n';
-      setBulkCaption(prev => prev + space + preset.tags);
-    }
+  const addHashtags = (tags) => {
+    const setter = mode === 'single' ? setCaption : setBulkCaption;
+    setter((prev) => {
+      const sep = prev.endsWith('\n') || prev === '' ? '' : '\n\n';
+      return prev + sep + tags;
+    });
   };
 
-  const currentCaption = mode === 'single' ? caption : bulkCaption;
-  const setCurrentCaption = mode === 'single' ? setCaption : setBulkCaption;
-  const charsLeft = MAX_CAPTION - currentCaption.length;
-  const pct = bulkProgress.total > 0 ? Math.round(((bulkProgress.uploaded + bulkProgress.failed) / bulkProgress.total) * 100) : 0;
+  const applyTemplate = (text) => {
+    if (!text) return; // "Hook + CTA" = blank = use AI
+    const setter = mode === 'single' ? setCaption : setBulkCaption;
+    setter(text);
+  };
+
+  const cap = mode === 'single' ? caption : bulkCaption;
+  const pct = bulkProgress.total > 0 ? Math.round(((bulkProgress.done + bulkProgress.failed) / bulkProgress.total) * 100) : 0;
+  const bulkVideoCount = bulkFiles.filter(f => detectType(f) === 'VIDEO').length;
+  const bulkImageCount = bulkFiles.length - bulkVideoCount;
 
   return (
-    <div className="composer">
-      {/* Mode Toggle */}
+    <div className="composer fade-in">
       <div className="mode-toggle">
-        <button className={`mode-btn ${mode === 'single' ? 'active' : ''}`} onClick={() => setMode('single')}>
-          Single Post
-        </button>
-        <button className={`mode-btn ${mode === 'bulk' ? 'active' : ''}`} onClick={() => setMode('bulk')}>
-          Bulk Upload
-        </button>
+        <button className={`mode-btn ${mode === 'single' ? 'active' : ''}`} onClick={() => setMode('single')}>Single</button>
+        <button className={`mode-btn ${mode === 'bulk' ? 'active' : ''}`} onClick={() => setMode('bulk')}>Bulk Upload</button>
       </div>
 
       {mode === 'single' ? (
         <div className="composer-grid">
-          {/* Left: Media Upload */}
           <div className="composer-left">
-            <label className="field-label">Media</label>
+            <label className="field-label">Video / Image</label>
             {!mediaPreview ? (
-              <div {...getSingleRootProps()} className={`dropzone ${isSingleDrag ? 'drag-active' : ''}`}>
-                <input {...getSingleInputProps()} />
+              <div {...singleDrop.getRootProps()} className={`dropzone ${singleDrop.isDragActive ? 'drag-active' : ''}`}>
+                <input {...singleDrop.getInputProps()} />
                 <div className="dropzone-inner">
                   <div className="dropzone-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="40" height="40">
-                      <rect x="3" y="3" width="18" height="18" rx="2"/>
-                      <circle cx="8.5" cy="8.5" r="1.5"/>
-                      <polyline points="21 15 16 10 5 21"/>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="44" height="44">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
                     </svg>
                   </div>
-                  <p className="dropzone-text">
-                    {isSingleDrag ? 'Drop it here...' : 'Drag & drop or click to upload'}
-                  </p>
-                  <p className="dropzone-hint">JPG, PNG, MP4, MOV — max 100MB</p>
+                  <p className="dropzone-text">{singleDrop.isDragActive ? 'Drop here' : 'Drop video or click to browse'}</p>
+                  <p className="dropzone-hint">MP4, MOV, JPG, PNG -- up to 500MB</p>
                 </div>
               </div>
             ) : (
               <div className="media-preview-wrap">
-                {mediaType === 'IMAGE' ? (
-                  <img src={mediaPreview} alt="Preview" className="media-preview" />
-                ) : (
+                {mediaType === 'VIDEO' ? (
                   <video src={mediaPreview} controls className="media-preview" />
+                ) : (
+                  <img src={mediaPreview} alt="" className="media-preview" />
                 )}
-                <button className="remove-media" onClick={clearMedia} title="Remove">X</button>
-                <span className="media-badge">{mediaType}</span>
+                <button className="remove-media" onClick={clearMedia}>X</button>
+                <span className={`media-badge ${mediaType === 'VIDEO' ? 'video' : ''}`}>
+                  {mediaType === 'VIDEO' ? 'REEL' : 'IMAGE'}
+                </span>
               </div>
             )}
           </div>
 
-          {/* Right: Caption + Controls */}
           <div className="composer-right">
             <div className="field-group">
               <div className="field-header">
                 <label className="field-label">Caption</label>
-                <div className="field-header-right">
-                  <button className="ai-btn" onClick={handleGenerateCaption} disabled={aiLoading}>
-                    {aiLoading ? 'Generating...' : 'AI Caption'}
+                <div className="field-actions">
+                  <button className="ai-btn" onClick={handleAI} disabled={aiLoading}>
+                    {aiLoading ? 'Working...' : 'AI Caption'}
                   </button>
-                  <span className={`char-count ${charsLeft < 100 ? 'warn' : ''}`}>
-                    {charsLeft.toLocaleString()} left
+                  <span className={`char-count ${MAX_CAPTION - cap.length < 100 ? 'warn' : ''}`}>
+                    {(MAX_CAPTION - caption.length).toLocaleString()}
                   </span>
                 </div>
               </div>
               <textarea
                 className="caption-input"
-                placeholder="Write your caption or use AI Caption..."
+                placeholder="Write a caption or leave blank -- AI will analyze the first frame and write one for you..."
                 value={caption}
-                onChange={e => setCaption(e.target.value.slice(0, MAX_CAPTION))}
-                rows={8}
+                onChange={(e) => setCaption(e.target.value.slice(0, MAX_CAPTION))}
+                rows={7}
               />
+
+              {captionQuality.level !== 'none' && (
+                <div className="caption-quality">
+                  <span className={`quality-dot ${captionQuality.level}`} />
+                  <span className="text-dim">{captionQuality.label}</span>
+                </div>
+              )}
+
               <div className="hashtag-presets">
-                <span className="presets-label">Quick hashtags:</span>
-                {HASHTAG_PRESETS.map(p => (
-                  <button key={p.label} className="preset-btn" onClick={() => insertHashtags(p)}>
-                    {p.label}
+                {HASHTAG_PRESETS.map((p) => (
+                  <button key={p.label} className="preset-btn" onClick={() => addHashtags(p.tags)}>{p.label}</button>
+                ))}
+              </div>
+            </div>
+
+            <div className="template-section">
+              <label className="field-label">Caption Templates</label>
+              <div className="template-row">
+                {CAPTION_TEMPLATES.map((t) => (
+                  <button key={t.label} className="template-btn" onClick={() => applyTemplate(t.text)}>
+                    {t.label}
                   </button>
                 ))}
               </div>
             </div>
 
-            <div className="publish-actions">
-              <button
-                className={`publish-btn ${loading ? 'loading' : ''}`}
-                onClick={handlePublishSingle}
-                disabled={loading || !mediaFile}
-              >
-                {loading && loadingStep.includes('Publish') ? (
-                  <><span className="spinner" />{loadingStep}</>
-                ) : (
-                  'Publish Now'
-                )}
+            {loading && (
+              <div className="loading-bar"><span className="spinner" /> {loadingStep}</div>
+            )}
+
+            <div className="action-row">
+              <button className="btn-primary" onClick={handlePublishNow} disabled={loading || !mediaFile}>
+                {loading ? 'Publishing...' : 'Publish Now'}
               </button>
-              <button
-                className={`queue-btn ${loading ? 'loading' : ''}`}
-                onClick={handleQueueSingle}
-                disabled={loading || !mediaFile}
-              >
-                {loading && loadingStep.includes('queue') ? (
-                  <><span className="spinner" />{loadingStep}</>
-                ) : (
-                  'Add to Queue'
-                )}
+              <button className="btn-secondary" onClick={handleAddToQueue} disabled={loading || !mediaFile}>
+                Add to Queue
               </button>
             </div>
+            <p className="hint" style={{ marginTop: 8 }}>Leave caption blank and AI will analyze the video's first frame to generate a hook + hashtags automatically.</p>
           </div>
         </div>
       ) : (
-        /* BULK MODE */
-        <div className="bulk-section">
-          <div className="bulk-grid">
-            <div className="bulk-left">
-              <label className="field-label">Upload Files (max {MAX_FILES})</label>
-              <div {...getBulkRootProps()} className={`dropzone dropzone-bulk ${isBulkDrag ? 'drag-active' : ''}`}>
-                <input {...getBulkInputProps()} />
-                <div className="dropzone-inner">
-                  <div className="dropzone-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="40" height="40">
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                      <polyline points="17 8 12 3 7 8"/>
-                      <line x1="12" y1="3" x2="12" y2="15"/>
-                    </svg>
-                  </div>
-                  <p className="dropzone-text">
-                    {isBulkDrag ? 'Drop files here...' : 'Drop up to 1000 images or click to select'}
-                  </p>
-                  <p className="dropzone-hint">JPG, PNG — images only for bulk</p>
+        <div className="bulk-layout">
+          <div className="bulk-left">
+            <label className="field-label">Videos & Images (up to {MAX_FILES.toLocaleString()})</label>
+            <div {...bulkDrop.getRootProps()} className={`dropzone dropzone-bulk ${bulkDrop.isDragActive ? 'drag-active' : ''}`}>
+              <input {...bulkDrop.getInputProps()} />
+              <div className="dropzone-inner">
+                <div className="dropzone-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="40" height="40">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                  </svg>
                 </div>
+                <p className="dropzone-text">Drop videos and images here</p>
+                <p className="dropzone-hint">MP4, MOV, JPG, PNG -- up to 500MB each</p>
               </div>
-
-              {bulkFiles.length > 0 && (
-                <div className="bulk-file-info">
-                  <span className="bulk-count">{bulkFiles.length} file{bulkFiles.length !== 1 ? 's' : ''} selected</span>
-                  <button className="clear-bulk-btn" onClick={() => setBulkFiles([])}>Clear All</button>
-                </div>
-              )}
-
-              {bulkFiles.length > 0 && (
-                <div className="bulk-preview-grid">
-                  {bulkFiles.slice(0, 20).map((file, i) => (
-                    <div key={i} className="bulk-thumb-wrap">
-                      <img src={URL.createObjectURL(file)} alt="" className="bulk-thumb" />
-                      <button className="bulk-thumb-remove" onClick={() => removeBulkFile(i)}>X</button>
-                    </div>
-                  ))}
-                  {bulkFiles.length > 20 && (
-                    <div className="bulk-thumb-more">+{bulkFiles.length - 20} more</div>
-                  )}
-                </div>
-              )}
             </div>
 
-            <div className="bulk-right">
-              <div className="field-group">
-                <div className="field-header">
-                  <label className="field-label">Caption (applied to all)</label>
-                  <div className="field-header-right">
-                    <button className="ai-btn" onClick={handleGenerateCaption} disabled={aiLoading}>
-                      {aiLoading ? 'Generating...' : 'AI Caption'}
-                    </button>
-                    <span className={`char-count ${charsLeft < 100 ? 'warn' : ''}`}>
-                      {charsLeft.toLocaleString()} left
-                    </span>
-                  </div>
+            {bulkFiles.length > 0 && (
+              <>
+                <div className="upload-stats">
+                  <div className="upload-stat"><strong>{bulkFiles.length}</strong> total</div>
+                  <div className="upload-stat"><strong>{bulkVideoCount}</strong> videos</div>
+                  <div className="upload-stat"><strong>{bulkImageCount}</strong> images</div>
                 </div>
-                <textarea
-                  className="caption-input"
-                  placeholder="Leave blank for AI-generated captions per post..."
-                  value={bulkCaption}
-                  onChange={e => setBulkCaption(e.target.value.slice(0, MAX_CAPTION))}
-                  rows={6}
-                />
-                <div className="hashtag-presets">
-                  <span className="presets-label">Quick hashtags:</span>
-                  {HASHTAG_PRESETS.map(p => (
-                    <button key={p.label} className="preset-btn" onClick={() => insertHashtags(p)}>
-                      {p.label}
-                    </button>
+                <div className="bulk-info">
+                  <span>{bulkFiles.length} file{bulkFiles.length !== 1 ? 's' : ''}</span>
+                  <button className="text-btn danger" onClick={() => setBulkFiles([])}>Clear</button>
+                </div>
+                <div className="bulk-thumbs">
+                  {bulkFiles.slice(0, 28).map((f, i) => (
+                    <div key={i} className="bulk-thumb">
+                      {detectType(f) === 'VIDEO' ? (
+                        <div className="bulk-thumb-vid">VID</div>
+                      ) : (
+                        <img src={URL.createObjectURL(f)} alt="" />
+                      )}
+                    </div>
                   ))}
+                  {bulkFiles.length > 28 && <div className="bulk-thumb more">+{bulkFiles.length - 28}</div>}
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="bulk-right">
+            <div className="field-group">
+              <div className="field-header">
+                <label className="field-label">Caption (all posts)</label>
+                <button className="ai-btn" onClick={handleAI} disabled={aiLoading}>
+                  {aiLoading ? '...' : 'AI Caption'}
+                </button>
+              </div>
+              <textarea
+                className="caption-input"
+                placeholder="Leave blank -- each video's first frame will be analyzed by AI to generate a unique caption with hooks and hashtags..."
+                value={bulkCaption}
+                onChange={(e) => setBulkCaption(e.target.value.slice(0, MAX_CAPTION))}
+                rows={5}
+              />
+              <div className="hashtag-presets">
+                {HASHTAG_PRESETS.map((p) => (
+                  <button key={p.label} className="preset-btn" onClick={() => addHashtags(p.tags)}>{p.label}</button>
+                ))}
+              </div>
+            </div>
+
+            <p className="hint">Leave caption blank. The auto-poster analyzes each video's first frame with GPT-4o vision and writes a unique viral caption with hooks and hashtags for each Reel.</p>
+
+            {bulkProgress.active && (
+              <div className="progress-section">
+                <div className="progress-track"><div className="progress-fill" style={{ width: `${pct}%` }} /></div>
+                <div className="progress-info">
+                  <span>{bulkProgress.done}/{bulkProgress.total} uploaded</span>
+                  {bulkProgress.failed > 0 && <span className="text-red">{bulkProgress.failed} failed</span>}
+                  <span>{pct}%</span>
                 </div>
               </div>
+            )}
 
-              <p className="bulk-hint">
-                Leave caption blank and the auto-poster will generate unique AI captions for each post.
-              </p>
-
-              {bulkProgress.inProgress && (
-                <div className="progress-section">
-                  <div className="progress-bar-track">
-                    <div className="progress-bar-fill" style={{ width: `${pct}%` }} />
-                  </div>
-                  <div className="progress-stats">
-                    <span>{bulkProgress.uploaded} uploaded</span>
-                    {bulkProgress.failed > 0 && <span className="progress-fail">{bulkProgress.failed} failed</span>}
-                    <span>{pct}%</span>
-                  </div>
-                </div>
+            <div className="action-row">
+              {bulkProgress.active ? (
+                <button className="btn-danger" onClick={() => { abortRef.current = true; }}>Cancel</button>
+              ) : (
+                <button className="btn-primary" onClick={handleBulkUpload} disabled={bulkFiles.length === 0}>
+                  Queue {bulkFiles.length} File{bulkFiles.length !== 1 ? 's' : ''}
+                </button>
               )}
-
-              <div className="publish-actions">
-                {bulkProgress.inProgress ? (
-                  <button className="cancel-btn" onClick={handleAbort}>Cancel Upload</button>
-                ) : (
-                  <button
-                    className="publish-btn"
-                    onClick={handleBulkUpload}
-                    disabled={bulkFiles.length === 0}
-                  >
-                    Queue {bulkFiles.length} Post{bulkFiles.length !== 1 ? 's' : ''} for Auto-Post
-                  </button>
-                )}
-              </div>
             </div>
           </div>
         </div>
