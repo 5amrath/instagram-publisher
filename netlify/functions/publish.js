@@ -1,52 +1,22 @@
-// Netlify Function: publish
-// Creates an Instagram media container then publishes it (or schedules it).
-// Instagram Graph API flow:
-//   1. POST /{user-id}/media  → returns container id
-//   2. POST /{user-id}/media_publish  → publishes (if not scheduled)
-//
-// Note: Scheduled publishing requires a Creator/Business account with
-// content publishing permissions and is only available via the API
-// for accounts using the Content Publishing API (approved apps).
-// For scheduling, we store the job locally and use a Netlify scheduled
-// function to publish at the right time.
+const axios = require('axios');
 
-const https = require('https');
+const IG_BASE = 'https://graph.facebook.com/v21.0';
 
-const IG_BASE = 'graph.facebook.com';
-const IG_VERSION = 'v21.0';
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-async function igRequest(path, method = 'GET', body = null) {
-  const postData = body ? JSON.stringify(body) : null;
-
-  return new Promise((resolve, reject) => {
-    const options = {
-      hostname: IG_BASE,
-      path: `/${IG_VERSION}${path}`,
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(postData ? { 'Content-Length': Buffer.byteLength(postData) } : {}),
-      },
-    };
-
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed.error) reject(new Error(parsed.error.message));
-          else resolve(parsed);
-        } catch (e) {
-          reject(new Error('Invalid response from Instagram API'));
-        }
-      });
+async function waitForContainer(igUserId, creationId, token, maxAttempts = 30) {
+  for (let i = 0; i < maxAttempts; i++) {
+    const res = await axios.get(`${IG_BASE}/${creationId}`, {
+      params: { fields: 'status,status_code', access_token: token },
     });
-
-    req.on('error', reject);
-    if (postData) req.write(postData);
-    req.end();
-  });
+    const { status_code } = res.data;
+    if (status_code === 'FINISHED') return true;
+    if (status_code === 'ERROR') throw new Error('Instagram media processing failed');
+    await sleep(3000);
+  }
+  throw new Error('Media container timed out after 90s');
 }
 
 exports.handler = async (event) => {
@@ -54,103 +24,71 @@ exports.handler = async (event) => {
     return { statusCode: 405, body: JSON.stringify({ error: 'Method not allowed' }) };
   }
 
-  const token = process.env.INSTAGRAM_ACCESS_TOKEN;
-  const userId = process.env.INSTAGRAM_USER_ID;
-
-  if (!token || !userId) {
-    return {
-      statusCode: 500,
-      body: JSON.stringify({
-        error: 'INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_USER_ID must be set in Netlify environment variables.',
-      }),
-    };
-  }
-
-  let body;
   try {
-    body = JSON.parse(event.body);
-  } catch {
-    return { statusCode: 400, body: JSON.stringify({ error: 'Invalid JSON body' }) };
-  }
+    const { mediaUrl, videoUrl, mediaType, caption } = JSON.parse(event.body || '{}');
+    const igUserId = process.env.INSTAGRAM_USER_ID;
+    const token = process.env.INSTAGRAM_ACCESS_TOKEN;
 
-  const { mediaUrl, mediaType = 'IMAGE', caption = '', scheduleTime } = body;
+    if (!igUserId || !token) {
+      return { statusCode: 500, body: JSON.stringify({ error: 'Missing Instagram credentials' }) };
+    }
 
-  if (!mediaUrl) {
-    return { statusCode: 400, body: JSON.stringify({ error: 'mediaUrl is required' }) };
-  }
+    const isVideo = mediaType === 'VIDEO' || mediaType === 'REELS';
+    const mediaEndpoint = `${IG_BASE}/${igUserId}/media`;
 
-  try {
-    // Step 1 — Create media container
-    const containerParams = {
-      caption,
-      access_token: token,
-    };
-
-    if (mediaType === 'VIDEO') {
-      containerParams.media_type = 'REELS';
-      containerParams.video_url = mediaUrl;
+    let containerParams;
+    if (isVideo) {
+      const url = videoUrl || mediaUrl;
+      if (!url) return { statusCode: 400, body: JSON.stringify({ error: 'videoUrl required for video posts' }) };
+      containerParams = {
+        video_url: url,
+        media_type: 'REELS',
+        caption: caption || '',
+        access_token: token,
+      };
     } else {
-      containerParams.image_url = mediaUrl;
+      const url = mediaUrl;
+      if (!url) return { statusCode: 400, body: JSON.stringify({ error: 'mediaUrl required for image posts' }) };
+      containerParams = {
+        image_url: url,
+        caption: caption || '',
+        access_token: token,
+      };
     }
 
-    // If scheduling, add publish_time (Unix timestamp, must be 10 min–75 days in future)
-    if (scheduleTime) {
-      const ts = Math.floor(new Date(scheduleTime).getTime() / 1000);
-      containerParams.scheduled_publish_time = ts;
-      containerParams.media_type = mediaType === 'VIDEO' ? 'REELS' : 'IMAGE';
+    // Step 1: Create media container
+    const containerRes = await axios.post(mediaEndpoint, containerParams);
+    const creationId = containerRes.data.id;
+    if (!creationId) throw new Error('No creation_id from Instagram');
+
+    // Step 2: Wait for container to be ready (Reels need processing time)
+    if (isVideo) {
+      await waitForContainer(igUserId, creationId, token);
     }
 
-    const containerRes = await igRequest(
-      `/${userId}/media?${new URLSearchParams(containerParams)}`,
-      'POST'
-    );
+    // Step 3: Publish
+    const publishRes = await axios.post(`${IG_BASE}/${igUserId}/media_publish`, {
+      creation_id: creationId,
+      access_token: token,
+    });
 
-    const containerId = containerRes.id;
-    if (!containerId) throw new Error('No container ID returned from Instagram');
-
-    // Step 2 — Wait for container to be ready (for videos this can take a moment)
-    if (mediaType === 'VIDEO') {
-      await waitForContainer(containerId, token);
-    }
-
-    // Step 3 — Publish (or leave for scheduled publish)
-    let publishedId = containerId;
-    if (!scheduleTime) {
-      const publishRes = await igRequest(
-        `/${userId}/media_publish?creation_id=${containerId}&access_token=${token}`,
-        'POST'
-      );
-      publishedId = publishRes.id;
-    }
+    const igPostId = publishRes.data.id;
 
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        id: publishedId,
-        status: scheduleTime ? 'scheduled' : 'published',
-        scheduleTime: scheduleTime || null,
-      }),
+      body: JSON.stringify({ success: true, igPostId, creationId }),
     };
   } catch (err) {
-    console.error('publish error:', err.message);
+    console.error('Publish error:', err.response?.data || err.message);
+    const igError = err.response?.data?.error;
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: err.message }),
+      body: JSON.stringify({
+        error: igError?.message || err.message || 'Publish failed',
+        code: igError?.code,
+        type: igError?.type,
+      }),
     };
   }
 };
-
-// Poll container status until FINISHED (for videos)
-async function waitForContainer(containerId, token, maxAttempts = 10) {
-  for (let i = 0; i < maxAttempts; i++) {
-    const status = await igRequest(
-      `/${containerId}?fields=status_code&access_token=${token}`
-    );
-    if (status.status_code === 'FINISHED') return;
-    if (status.status_code === 'ERROR') throw new Error('Instagram media container processing failed');
-    // Wait 3 seconds between polls
-    await new Promise(r => setTimeout(r, 3000));
-  }
-  throw new Error('Video container timed out during processing');
-}
