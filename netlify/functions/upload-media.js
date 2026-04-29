@@ -1,4 +1,4 @@
-const cloudinary = require('cloudinary').v2;
+const { v2: cloudinary } = require('cloudinary');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -6,194 +6,122 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const VIDEO_EXTS = ['mp4', 'mov', 'avi', 'webm', 'mkv', 'm4v', '3gp'];
-const VIDEO_MIMES = ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/webm', 'video/x-matroska'];
+function parseMultipart(body, boundary, isBase64) {
+  const buf = isBase64 ? Buffer.from(body, 'base64') : Buffer.from(body, 'binary');
+  const boundaryBuf = Buffer.from('--' + boundary);
+  const parts = [];
+  let start = 0;
+
+  while (start < buf.length) {
+    const boundaryIdx = buf.indexOf(boundaryBuf, start);
+    if (boundaryIdx === -1) break;
+    const headerStart = boundaryIdx + boundaryBuf.length;
+    const CRLF2 = Buffer.from('\r\n\r\n');
+    const headerEnd = buf.indexOf(CRLF2, headerStart);
+    if (headerEnd === -1) break;
+    const headers = buf.slice(headerStart, headerEnd).toString();
+    const dataStart = headerEnd + 4;
+    const nextBoundaryIdx = buf.indexOf(boundaryBuf, dataStart);
+    if (nextBoundaryIdx === -1) break;
+    const dataEnd = nextBoundaryIdx - 2; // trim trailing CRLF
+    parts.push({ headers, data: buf.slice(dataStart, dataEnd) });
+    start = nextBoundaryIdx;
+  }
+  return parts;
+}
+
+function detectMediaType(filename, mimeType) {
+  const ext = (filename || '').toLowerCase().split('.').pop();
+  const videoExts = ['mp4', 'mov', 'avi', 'webm', 'mkv', 'm4v'];
+  const videoMimes = ['video/'];
+  if (videoExts.includes(ext)) return 'VIDEO';
+  if (videoMimes.some((m) => (mimeType || '').startsWith(m))) return 'VIDEO';
+  return 'IMAGE';
+}
 
 exports.handler = async (event) => {
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: JSON.stringify({ error: 'Method not allowed' }) };
   }
 
-  if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY) {
-    return { statusCode: 500, body: JSON.stringify({ error: 'Cloudinary not configured. Add CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET to env.' }) };
-  }
-
   try {
     const contentType = event.headers['content-type'] || event.headers['Content-Type'] || '';
-
-    if (!contentType.includes('multipart')) {
-      return { statusCode: 400, body: JSON.stringify({ error: 'Expected multipart/form-data' }) };
+    const boundaryMatch = contentType.match(/boundary=([^;]+)/);
+    if (!boundaryMatch) {
+      return { statusCode: 400, body: JSON.stringify({ error: 'No multipart boundary found' }) };
     }
+    const boundary = boundaryMatch[1].trim();
+    const parts = parseMultipart(event.body, boundary, event.isBase64Encoded);
 
-    const boundary = getBoundary(contentType);
-    if (!boundary) {
-      return { statusCode: 400, body: JSON.stringify({ error: 'No boundary found in content-type' }) };
-    }
+    let fileData = null;
+    let filename = 'upload';
+    let mimeType = '';
 
-    // Decode body -- Netlify base64-encodes binary uploads
-    const rawBody = event.isBase64Encoded
-      ? Buffer.from(event.body, 'base64')
-      : Buffer.from(event.body, 'binary');
-
-    const file = extractFile(rawBody, boundary);
-
-    if (!file || !file.data || file.data.length === 0) {
-      return { statusCode: 400, body: JSON.stringify({ error: 'No file found in upload. Make sure the form field is named "image" or "file".' }) };
-    }
-
-    console.log(`[upload] File: ${file.filename || 'unknown'}, size: ${file.data.length}, mime: ${file.contentType || 'unknown'}`);
-
-    // Detect if video
-    const ext = file.filename ? file.filename.toLowerCase().split('.').pop() : '';
-    const isVideo = VIDEO_MIMES.includes(file.contentType) || VIDEO_EXTS.includes(ext);
-
-    // Upload to Cloudinary using resource_type auto so it figures out the format
-    const uploadResult = await new Promise((resolve, reject) => {
-      const opts = {
-        resource_type: 'auto',
-        folder: 'instagram-publisher',
-        timeout: 300000,
-      };
-
-      // If we know the filename, pass it so Cloudinary can detect format
-      if (file.filename) {
-        opts.public_id = file.filename.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '_') + '_' + Date.now();
+    for (const part of parts) {
+      const cdMatch = part.headers.match(/Content-Disposition:[^\r\n]*name="([^"]+)"/i);
+      const ctMatch = part.headers.match(/Content-Type:\s*([^\r\n]+)/i);
+      const fnMatch = part.headers.match(/filename="([^"]+)"/i);
+      if (cdMatch && (cdMatch[1] === 'image' || cdMatch[1] === 'file' || cdMatch[1] === 'video')) {
+        fileData = part.data;
+        if (fnMatch) filename = fnMatch[1];
+        if (ctMatch) mimeType = ctMatch[1].trim();
+        break;
       }
+    }
 
-      const stream = cloudinary.uploader.upload_stream(opts, (error, result) => {
-        if (error) {
-          console.error('[upload] Cloudinary error:', error.message);
-          reject(error);
-        } else {
-          resolve(result);
+    if (!fileData) {
+      return { statusCode: 400, body: JSON.stringify({ error: 'No file found in upload' }) };
+    }
+
+    const mediaType = detectMediaType(filename, mimeType);
+    const resourceType = mediaType === 'VIDEO' ? 'video' : 'image';
+
+    const uploadResult = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          resource_type: resourceType,
+          folder: 'instagram-publisher',
+          public_id: `post_${Date.now()}`,
+        },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
         }
-      });
-
-      stream.end(file.data);
+      );
+      uploadStream.end(fileData);
     });
 
-    const mediaUrl = uploadResult.secure_url;
-    const detectedVideo = uploadResult.resource_type === 'video' || isVideo;
-
+    const videoUrl = mediaType === 'VIDEO' ? uploadResult.secure_url : null;
     let thumbnailUrl = null;
-    if (detectedVideo) {
-      // Get first frame as JPG thumbnail
-      thumbnailUrl = mediaUrl
-        .replace('/video/upload/', '/video/upload/so_0,w_640,h_640,c_fill,f_jpg/')
-        .replace(/\.[^.]+$/, '.jpg');
-    } else {
-      thumbnailUrl = mediaUrl;
-    }
 
-    console.log(`[upload] Success: type=${detectedVideo ? 'VIDEO' : 'IMAGE'}, url=${mediaUrl.substring(0, 80)}...`);
+    if (mediaType === 'VIDEO') {
+      // Generate thumbnail from first frame using Cloudinary transformation
+      thumbnailUrl = cloudinary.url(uploadResult.public_id, {
+        resource_type: 'video',
+        transformation: [{ fetch_format: 'jpg', quality: 'auto', start_offset: '0' }],
+        secure: true,
+      });
+    }
 
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        url: mediaUrl,
-        videoUrl: detectedVideo ? mediaUrl : null,
+        url: uploadResult.secure_url,
+        videoUrl,
         thumbnailUrl,
-        mediaType: detectedVideo ? 'VIDEO' : 'IMAGE',
+        publicId: uploadResult.public_id,
+        mediaType,
+        format: uploadResult.format,
+        width: uploadResult.width,
+        height: uploadResult.height,
       }),
     };
   } catch (err) {
-    console.error('[upload] Error:', err.message, err.http_code || '');
+    console.error('Upload error:', err);
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: `Upload failed: ${err.message}` }),
+      body: JSON.stringify({ error: err.message || 'Upload failed' }),
     };
   }
 };
-
-/**
- * Extract boundary string from content-type header.
- */
-function getBoundary(contentType) {
-  const match = contentType.match(/boundary=(?:"([^"]+)"|([^\s;]+))/i);
-  return match ? (match[1] || match[2]) : null;
-}
-
-/**
- * Parse multipart form data and extract the first file.
- * This handles binary data properly without corruption.
- */
-function extractFile(buffer, boundary) {
-  const boundaryBuf = Buffer.from('--' + boundary);
-  const crlfcrlf = Buffer.from('\r\n\r\n');
-  const crlf = Buffer.from('\r\n');
-
-  let pos = bufferIndexOf(buffer, boundaryBuf, 0);
-  if (pos === -1) return null;
-
-  while (pos !== -1) {
-    // Move past boundary + CRLF
-    const partStart = pos + boundaryBuf.length;
-
-    // Check for closing boundary (--)
-    if (buffer.length > partStart + 1 && buffer[partStart] === 0x2D && buffer[partStart + 1] === 0x2D) {
-      break;
-    }
-
-    // Find next boundary
-    const nextBoundary = bufferIndexOf(buffer, boundaryBuf, partStart);
-    if (nextBoundary === -1) break;
-
-    // Extract this part (between current boundary and next)
-    const partBuf = buffer.slice(partStart, nextBoundary);
-
-    // Split headers from body at \r\n\r\n
-    const headerEnd = bufferIndexOf(partBuf, crlfcrlf, 0);
-    if (headerEnd === -1) { pos = nextBoundary; continue; }
-
-    const headerStr = partBuf.slice(0, headerEnd).toString('utf-8');
-
-    // Body starts after \r\n\r\n, ends before trailing \r\n
-    let bodyStart = headerEnd + 4;
-    // Skip leading \r\n after boundary line
-    if (partBuf[0] === 0x0D && partBuf[1] === 0x0A) {
-      // Headers start after CRLF following boundary
-    }
-
-    let body = partBuf.slice(bodyStart);
-
-    // Remove trailing \r\n before next boundary
-    if (body.length >= 2 && body[body.length - 2] === 0x0D && body[body.length - 1] === 0x0A) {
-      body = body.slice(0, body.length - 2);
-    }
-
-    // Check if this part is a file upload
-    const nameMatch = headerStr.match(/name="([^"]+)"/);
-    const filenameMatch = headerStr.match(/filename="([^"]+)"/);
-    const ctMatch = headerStr.match(/Content-Type:\s*([^\r\n]+)/i);
-
-    if (nameMatch && (nameMatch[1] === 'image' || nameMatch[1] === 'file' || filenameMatch)) {
-      return {
-        name: nameMatch[1],
-        filename: filenameMatch ? filenameMatch[1] : null,
-        contentType: ctMatch ? ctMatch[1].trim() : null,
-        data: body,
-      };
-    }
-
-    pos = nextBoundary;
-  }
-
-  return null;
-}
-
-/**
- * Find buffer B inside buffer A starting from position.
- */
-function bufferIndexOf(buf, search, from) {
-  const len = buf.length;
-  const sLen = search.length;
-  for (let i = from; i <= len - sLen; i++) {
-    let match = true;
-    for (let j = 0; j < sLen; j++) {
-      if (buf[i + j] !== search[j]) { match = false; break; }
-    }
-    if (match) return i;
-  }
-  return -1;
-}
