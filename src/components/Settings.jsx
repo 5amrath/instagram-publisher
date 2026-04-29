@@ -1,126 +1,74 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
-const LIMIT_OPTIONS = [10, 15, 20, 25, 30, 40, 50];
+const LIMITS = [10, 15, 20, 25, 30, 40, 50];
 
 export default function Settings({ showToast }) {
-  const [dailyLimit, setDailyLimit] = useState(25);
+  const [limit, setLimit] = useState(25);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    async function fetchSettings() {
+    (async () => {
       try {
-        const res = await axios.get('/api/get-queue-stats');
-        setDailyLimit(res.data.dailyLimit || 25);
-      } catch (err) {
-        console.error('Failed to fetch settings:', err);
-      } finally {
-        setLoading(false);
-      }
-    }
-    fetchSettings();
+        const res = await axios.get('/.netlify/functions/get-queue-stats');
+        setLimit(res.data.dailyLimit || 25);
+      } catch {}
+      finally { setLoading(false); }
+    })();
   }, []);
 
-  const handleSave = async (value) => {
+  const save = async (val) => {
     setSaving(true);
     try {
-      await axios.post('/api/update-settings', { key: 'daily_limit', value: String(value) });
-      setDailyLimit(value);
-      showToast(`Daily limit set to ${value}`, 'success');
-    } catch (err) {
-      showToast('Failed to save setting', 'error');
-    } finally {
-      setSaving(false);
-    }
+      await axios.post('/.netlify/functions/update-settings', { key: 'daily_limit', value: String(val) });
+      setLimit(val);
+      showToast(`Limit set to ${val}/day`, 'success');
+    } catch { showToast('Failed to save', 'error'); }
+    finally { setSaving(false); }
   };
 
-  if (loading) {
-    return (
-      <div className="settings-loading">
-        <span className="spinner" /> Loading settings...
-      </div>
-    );
-  }
+  if (loading) return <div className="center-msg"><span className="spinner" /> Loading...</div>;
 
   return (
-    <div className="settings">
-      <h2 className="settings-title">Settings</h2>
+    <div className="settings fade-in">
+      <h2 className="page-title">Settings</h2>
 
-      <div className="settings-card">
-        <div className="settings-card-header">
-          <h3>Daily Post Limit</h3>
-          <p className="settings-desc">
-            Maximum number of posts the auto-poster will publish per day.
-            Instagram recommends staying under 25 for new accounts.
-          </p>
-        </div>
-        <div className="limit-grid">
-          {LIMIT_OPTIONS.map(opt => (
-            <button
-              key={opt}
-              className={`limit-btn ${dailyLimit === opt ? 'active' : ''}`}
-              onClick={() => handleSave(opt)}
-              disabled={saving}
-            >
-              {opt}
+      <div className="card">
+        <h3 className="card-title">Daily Reels Limit</h3>
+        <p className="text-dim mb-12">Max Reels the auto-poster publishes per day.</p>
+        <div className="limit-row">
+          {LIMITS.map((n) => (
+            <button key={n} className={`limit-btn ${limit === n ? 'active' : ''}`} onClick={() => save(n)} disabled={saving}>
+              {n}
             </button>
           ))}
         </div>
-        <p className="settings-current">Current: <strong>{dailyLimit} posts/day</strong></p>
+        <p className="text-dim mt-8">Current: <strong style={{ color: 'var(--t1)' }}>{limit}/day</strong></p>
       </div>
 
-      <div className="settings-card">
-        <div className="settings-card-header">
-          <h3>Auto-Post Schedule</h3>
-          <p className="settings-desc">
-            The worker runs every 10 minutes via Netlify Scheduled Functions.
-            It processes 1 post per run to stay within Instagram rate limits.
-          </p>
-        </div>
-        <div className="schedule-info">
-          <div className="schedule-row">
-            <span className="schedule-key">Frequency</span>
-            <span className="schedule-val">Every 10 minutes</span>
-          </div>
-          <div className="schedule-row">
-            <span className="schedule-key">Posts per run</span>
-            <span className="schedule-val">1</span>
-          </div>
-          <div className="schedule-row">
-            <span className="schedule-key">Max retries</span>
-            <span className="schedule-val">3 attempts before marking failed</span>
-          </div>
-          <div className="schedule-row">
-            <span className="schedule-key">AI Captions</span>
-            <span className="schedule-val">Auto-generated when caption is empty (GPT-4o-mini)</span>
+      <div className="settings-grid">
+        <div className="card">
+          <h3 className="card-title">Auto-Post Worker</h3>
+          <div className="info-grid">
+            <div className="info-row"><span className="info-key">Frequency</span><span className="info-val">Every 10 min</span></div>
+            <div className="info-row"><span className="info-key">Posts per run</span><span className="info-val">1</span></div>
+            <div className="info-row"><span className="info-key">Max retries</span><span className="info-val">3</span></div>
+            <div className="info-row"><span className="info-key">AI Captions</span><span className="info-val">GPT-4o-mini vision</span></div>
+            <div className="info-row"><span className="info-key">Video</span><span className="info-val">Cloudinary + Reels</span></div>
+            <div className="info-row"><span className="info-key">Queue order</span><span className="info-val">FIFO (oldest first)</span></div>
           </div>
         </div>
-      </div>
 
-      <div className="settings-card">
-        <div className="settings-card-header">
-          <h3>Instagram Rules</h3>
-          <p className="settings-desc">
-            Key limits to keep your account safe.
-          </p>
-        </div>
-        <div className="schedule-info">
-          <div className="schedule-row">
-            <span className="schedule-key">Max posts/day (API)</span>
-            <span className="schedule-val">50 (Instagram hard limit)</span>
-          </div>
-          <div className="schedule-row">
-            <span className="schedule-key">Caption length</span>
-            <span className="schedule-val">2,200 characters max</span>
-          </div>
-          <div className="schedule-row">
-            <span className="schedule-key">Hashtags</span>
-            <span className="schedule-val">30 max per post</span>
-          </div>
-          <div className="schedule-row">
-            <span className="schedule-key">Image formats</span>
-            <span className="schedule-val">JPEG, PNG (aspect ratio 4:5 to 1.91:1)</span>
+        <div className="card">
+          <h3 className="card-title">Instagram Limits</h3>
+          <div className="info-grid">
+            <div className="info-row"><span className="info-key">API limit</span><span className="info-val">50/day</span></div>
+            <div className="info-row"><span className="info-key">Caption</span><span className="info-val">2,200 chars</span></div>
+            <div className="info-row"><span className="info-key">Hashtags</span><span className="info-val">30 max</span></div>
+            <div className="info-row"><span className="info-key">Reels</span><span className="info-val">MP4, 3-90 sec</span></div>
+            <div className="info-row"><span className="info-key">Image</span><span className="info-val">JPEG/PNG</span></div>
+            <div className="info-row"><span className="info-key">API</span><span className="info-val">Graph API v21.0</span></div>
           </div>
         </div>
       </div>
