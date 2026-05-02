@@ -1,69 +1,53 @@
-import React, { useState, useRef } from 'react';
-import Dashboard from './components/Dashboard';
+import { useState } from 'react';
+import './App.css';
 import PostComposer from './components/PostComposer';
+import Dashboard from './components/Dashboard';
 import PostHistory from './components/PostHistory';
 import Settings from './components/Settings';
-import './App.css';
 
 export default function App() {
   const [tab, setTab] = useState('upload');
-  const [toast, setToast] = useState(null);
-  const toastTimer = useRef(null);
-
-  // ── Bulk state lifted here so it survives tab switches ──────────────────
   const [bulkFiles, setBulkFiles] = useState([]);
-  const [bulkCaption, setBulkCaption] = useState('');
-  const [bulkProgress, setBulkProgress] = useState({ total: 0, done: 0, failed: 0, active: false });
+  const [bulkProgress, setBulkProgress] = useState({ total: 0, done: 0, running: false });
 
-  const showToast = (message, type = 'success') => {
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    setToast({ message, type });
-    toastTimer.current = setTimeout(() => setToast(null), 4000);
-  };
+  const tabs = [
+    { id: 'dashboard', label: 'Dashboard' },
+    { id: 'upload', label: 'Upload', badge: bulkFiles.length || null },
+    { id: 'history', label: 'History' },
+    { id: 'settings', label: 'Settings' },
+  ];
 
   return (
-    <div className="app">
+    <div className="app-shell">
       <nav className="nav">
-        <span className="nav-logo">Insta Publisher</span>
-        <div className="nav-tabs">
-          {['dashboard', 'upload', 'history', 'settings'].map((t) => (
+        <div className="nav-brand">Insta Publisher</div>
+        <div className="nav-links">
+          {tabs.map(t => (
             <button
-              key={t}
-              className={`nav-tab ${tab === t ? 'active' : ''}`}
-              onClick={() => setTab(t)}
+              key={t.id}
+              className={`nav-link ${tab === t.id ? 'active' : ''}`}
+              onClick={() => setTab(t.id)}
             >
-              {t.charAt(0).toUpperCase() + t.slice(1)}
-              {t === 'upload' && bulkFiles.length > 0 && (
-                <span className="nav-badge">{bulkFiles.length}</span>
-              )}
+              {t.label}
+              {t.badge ? <span className="nav-badge">{t.badge}</span> : null}
             </button>
           ))}
         </div>
       </nav>
 
-      <main className="main">
-        {tab === 'dashboard' && <Dashboard showToast={showToast} />}
+      <main className="main-content">
+        {tab === 'dashboard' && <Dashboard />}
         {tab === 'upload' && (
           <PostComposer
-            showToast={showToast}
             bulkFiles={bulkFiles}
             setBulkFiles={setBulkFiles}
-            bulkCaption={bulkCaption}
-            setBulkCaption={setBulkCaption}
             bulkProgress={bulkProgress}
             setBulkProgress={setBulkProgress}
           />
         )}
-        {tab === 'history' && <PostHistory showToast={showToast} />}
-        {tab === 'settings' && <Settings showToast={showToast} />}
+        {tab === 'history' && <PostHistory />}
+        {tab === 'settings' && <Settings />}
       </main>
-
-      {toast && (
-        <div className={`toast toast-${toast.type}`}>
-          <span className="toast-dot" />
-          {toast.message}
-        </div>
-      )}
     </div>
   );
 }
