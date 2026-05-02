@@ -1,447 +1,474 @@
-import React, { useState, useCallback, useRef, useMemo } from 'react';
-import axios from 'axios';
+import { useState, useRef, useCallback } from 'react';
 
-const MAX_CAPTION = 2200;
-const MAX_CONCURRENT = 3;
-const MAX_FILES = 1000;
+const CATEGORY_TAGS = ['Deals', 'Looksmax', 'Forward Growth', 'Skincare', 'Fitness'];
+const CAPTION_TEMPLATES = ['Hook + CTA', 'Before/After', 'Problem/Solution', 'Social Proof', 'Urgency'];
 
-const HASHTAG_PRESETS = [
-  { label: 'Deals', tags: '#deals #discount #save #musthave #trending #viral #affiliate' },
-  { label: 'Looksmax', tags: '#looksmaxxing #skincare #glowup #selfcare #grooming #mog' },
-  { label: 'Forward Growth', tags: '#forwardgrowth #maxila #posture #jawline #mewing #mog' },
-  { label: 'Skincare', tags: '#skincare #acnetreatment #clearsky #glowup #routine #bp' },
-  { label: 'Fitness', tags: '#fitness #gym #gains #testosterone #physique #bulk' },
-];
-
-const CAPTION_TEMPLATES = [
-  { label: 'Hook + CTA', text: '' },
-  { label: 'Before/After', text: 'Before vs After. The results speak for themselves.\n\nLink in bio.' },
-  { label: 'Problem/Solution', text: "You've been doing it wrong this whole time.\n\nHere's what actually works.\n\nLink in bio." },
-  { label: 'Social Proof', text: "This is why everyone is switching.\n\nDon't get left behind.\n\nLink in bio." },
-  { label: 'Urgency', text: "This won't last long.\n\nGrab it before it's gone.\n\nLink in bio." },
-];
-
-const VIDEO_EXTS = ['mp4', 'mov', 'avi', 'webm', 'mkv', 'm4v'];
-const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
-
-function detectType(file) {
-  if (file.type && file.type.startsWith('video/')) return 'VIDEO';
-  const ext = file.name.toLowerCase().split('.').pop();
-  if (VIDEO_EXTS.includes(ext)) return 'VIDEO';
-  return 'IMAGE';
-}
-
-function isMediaFile(file) {
-  const ext = file.name.toLowerCase().split('.').pop();
-  return VIDEO_EXTS.includes(ext) || IMAGE_EXTS.includes(ext);
-}
-
-function formatBytes(bytes) {
-  if (!bytes) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-}
-
-// Props: showToast + lifted bulk state from App
 export default function PostComposer({
-  showToast,
   bulkFiles, setBulkFiles,
-  bulkCaption, setBulkCaption,
-  bulkProgress, setBulkProgress,
+  bulkProgress, setBulkProgress
 }) {
   const [mode, setMode] = useState('single');
-
-  // Single upload state (local — fine to reset)
-  const [mediaFile, setMediaFile] = useState(null);
-  const [mediaPreview, setMediaPreview] = useState(null);
-  const [mediaType, setMediaType] = useState('VIDEO');
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState(null);
   const [caption, setCaption] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [loadingStep, setLoadingStep] = useState('');
-  const [aiLoading, setAiLoading] = useState(false);
+  const [captionScore, setCaptionScore] = useState(null);
+  const [loadingCaption, setLoadingCaption] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [queueing, setQueueing] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [fileStatuses, setFileStatuses] = useState({});
+  const dropRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const bulkInputRef = useRef(null);
 
-  // Per-file status map for bulk  { filename -> 'pending'|'uploading'|'done'|'failed' }
-  const [fileStatus, setFileStatus] = useState({});
-  const abortRef = useRef(false);
-  const bulkDropRef = useRef(null);
-  const singleDropRef = useRef(null);
-  const singleFileInputRef = useRef(null);
-  const bulkFileInputRef = useRef(null);
-  const [isDragging, setIsDragging] = useState(false);
+  const showToast = (msg, type = 'success') => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 5000);
+  };
 
-  const captionQuality = useMemo(() => {
-    const c = mode === 'single' ? caption : bulkCaption;
-    if (!c || c.trim().length === 0) return { level: 'none', label: '' };
-    const len = c.trim().length;
-    const hasHashtags = (c.match(/#\w+/g) || []).length;
-    const hasNewlines = c.includes('\n');
-    const hasCTA = /link in bio|check . out|grab it|shop now|tap link/i.test(c);
+  const scoreCaption = (text) => {
+    if (!text || text.length < 20) return null;
     let score = 0;
-    if (len > 20) score++;
-    if (len > 60) score++;
-    if (hasHashtags >= 3) score++;
-    if (hasHashtags >= 6) score++;
-    if (hasNewlines) score++;
-    if (hasCTA) score++;
-    if (score >= 5) return { level: 'good', label: 'Strong caption' };
-    if (score >= 3) return { level: 'ok', label: 'Could be stronger' };
-    return { level: 'weak', label: 'Add more hooks/hashtags' };
-  }, [caption, bulkCaption, mode]);
+    if (text.length > 80) score += 30;
+    if (text.includes('#')) score += 25;
+    if (text.toLowerCase().includes('link in bio')) score += 15;
+    if (/pov:|this is why|stop |nobody talks about|the truth about/i.test(text)) score += 20;
+    if (text.split('\n').length > 1) score += 10;
+    return Math.min(score, 100);
+  };
 
-  // ── Single handlers ───────────────────────────────────────────────────────
-  const handleSingleDrop = (e) => {
+  const handleFileSelect = (f) => {
+    if (!f) return;
+    setFile(f);
+    setCaption('');
+    setCaptionScore(null);
+    const url = URL.createObjectURL(f);
+    setPreview(url);
+  };
+
+  const handleDrop = useCallback((e) => {
     e.preventDefault();
-    const file = Array.from(e.dataTransfer.files || []).find(isMediaFile);
-    if (file) { setMediaType(detectType(file)); setMediaFile(file); setMediaPreview(URL.createObjectURL(file)); }
-  };
-
-  const handleSingleFileInput = (e) => {
-    const file = e.target.files?.[0];
-    if (file) { setMediaType(detectType(file)); setMediaFile(file); setMediaPreview(URL.createObjectURL(file)); }
-  };
-
-  const clearMedia = () => {
-    if (mediaPreview) URL.revokeObjectURL(mediaPreview);
-    setMediaFile(null); setMediaPreview(null); setMediaType('VIDEO');
-    if (singleFileInputRef.current) singleFileInputRef.current.value = '';
-  };
-
-  // ── Folder/file drop for bulk ─────────────────────────────────────────────
-  const collectFilesFromEntry = async (entry) => {
-    const files = [];
-    if (entry.isFile) {
-      const file = await new Promise((res) => entry.file(res));
-      if (isMediaFile(file)) files.push(file);
-    } else if (entry.isDirectory) {
-      const reader = entry.createReader();
-      let batch;
-      do {
-        batch = await new Promise((res) => reader.readEntries(res));
-        for (const child of batch) files.push(...(await collectFilesFromEntry(child)));
-      } while (batch.length > 0);
-    }
-    return files;
-  };
-
-  const handleBulkDrop = useCallback(async (e) => {
-    e.preventDefault(); e.stopPropagation(); setIsDragging(false);
-    const items = Array.from(e.dataTransfer.items || []);
-    const allFiles = [];
-    if (items.length > 0 && items[0].webkitGetAsEntry) {
-      for (const item of items) {
-        const entry = item.webkitGetAsEntry();
-        if (entry) allFiles.push(...(await collectFilesFromEntry(entry)));
-      }
-    } else {
-      allFiles.push(...Array.from(e.dataTransfer.files || []).filter(isMediaFile));
-    }
-    if (allFiles.length === 0) { showToast('No video/image files found', 'error'); return; }
-    const toAdd = allFiles.slice(0, MAX_FILES);
-    setBulkFiles((prev) => [...prev, ...toAdd].slice(0, MAX_FILES));
-    showToast(`Added ${toAdd.length} file${toAdd.length !== 1 ? 's' : ''}`, 'success');
-  }, []);
-
-  const handleBulkFileInput = (e) => {
-    const files = Array.from(e.target.files || []).filter(isMediaFile);
-    if (!files.length) return;
-    setBulkFiles((prev) => [...prev, ...files].slice(0, MAX_FILES));
-    showToast(`Added ${files.length} file${files.length !== 1 ? 's' : ''}`, 'success');
-    e.target.value = '';
-  };
-
-  // ── Upload single file ────────────────────────────────────────────────────
-  const uploadFile = async (file) => {
-    const formData = new FormData();
-    formData.append('image', file);
-    const res = await axios.post('/api/upload-media', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 600000, // 10 min per file
-    });
-    return res.data;
-  };
-
-  // ── Single publish ────────────────────────────────────────────────────────
-  const handlePublishNow = async () => {
-    if (!mediaFile) return showToast('Select a file first', 'error');
-    setLoading(true);
-    try {
-      setLoadingStep('Uploading to Cloudinary...');
-      const upload = await uploadFile(mediaFile);
-      let finalCaption = caption;
-      if (!finalCaption.trim() && upload.thumbnailUrl) {
-        setLoadingStep('Analyzing first frame with AI...');
-        try {
-          const aiRes = await axios.post('/api/analyze-frame', { imageUrl: upload.thumbnailUrl });
-          finalCaption = aiRes.data.caption || '';
-          if (finalCaption) setCaption(finalCaption);
-        } catch {}
-      }
-      setLoadingStep(upload.mediaType === 'VIDEO' ? 'Publishing Reel...' : 'Publishing...');
-      await axios.post('/api/publish', { mediaUrl: upload.url, videoUrl: upload.videoUrl, mediaType: upload.mediaType, caption: finalCaption });
-      showToast(upload.mediaType === 'VIDEO' ? 'Reel published!' : 'Post published!', 'success');
-      setCaption(''); clearMedia();
-    } catch (err) {
-      showToast(`Failed: ${err.response?.data?.error || err.message}`, 'error');
-    } finally { setLoading(false); setLoadingStep(''); }
-  };
-
-  const handleAddToQueue = async () => {
-    if (!mediaFile) return showToast('Select a file first', 'error');
-    setLoading(true);
-    try {
-      setLoadingStep('Uploading...');
-      const upload = await uploadFile(mediaFile);
-      setLoadingStep('Saving to queue...');
-      await axios.post('/api/save-post', { mediaUrl: upload.url, videoUrl: upload.videoUrl, thumbnailUrl: upload.thumbnailUrl, mediaType: upload.mediaType, caption });
-      showToast('Added to queue!', 'success');
-      setCaption(''); clearMedia();
-    } catch (err) {
-      showToast(`Failed: ${err.response?.data?.error || err.message}`, 'error');
-    } finally { setLoading(false); setLoadingStep(''); }
-  };
-
-  // ── Bulk queue ────────────────────────────────────────────────────────────
-  const handleBulkUpload = async () => {
-    if (bulkFiles.length === 0) return showToast('Add files first', 'error');
-    abortRef.current = false;
-    const total = bulkFiles.length;
-    let done = 0, failed = 0;
-    const initStatus = {};
-    bulkFiles.forEach(f => { initStatus[f.name + f.size] = 'pending'; });
-    setFileStatus(initStatus);
-    setBulkProgress({ total, done: 0, failed: 0, active: true });
-
-    const queue = [...bulkFiles];
-    let active = 0;
-
-    await new Promise((resolve) => {
-      const next = async () => {
-        while (queue.length > 0 && active < MAX_CONCURRENT && !abortRef.current) {
-          const file = queue.shift();
-          const key = file.name + file.size;
-          active++;
-          setFileStatus(s => ({ ...s, [key]: 'uploading' }));
-          (async () => {
-            try {
-              const upload = await uploadFile(file);
-              await axios.post('/api/save-post', { mediaUrl: upload.url, videoUrl: upload.videoUrl, thumbnailUrl: upload.thumbnailUrl, mediaType: upload.mediaType, caption: bulkCaption });
-              done++;
-              setFileStatus(s => ({ ...s, [key]: 'done' }));
-            } catch (err) {
-              failed++;
-              setFileStatus(s => ({ ...s, [key]: 'failed' }));
-              console.error('Upload failed:', file.name, err.message);
-            } finally {
-              active--;
-              setBulkProgress({ total, done, failed, active: true });
-              if (queue.length === 0 && active === 0) resolve();
-              else next();
-            }
-          })();
-        }
-        if (queue.length === 0 && active === 0) resolve();
+    const items = e.dataTransfer.items;
+    if (mode === 'bulk') {
+      const videos = [];
+      const processEntry = (entry) => {
+        return new Promise((resolve) => {
+          if (entry.isFile) {
+            entry.file((f) => {
+              if (f.type.startsWith('video/')) videos.push(f);
+              resolve();
+            });
+          } else if (entry.isDirectory) {
+            const reader = entry.createReader();
+            reader.readEntries(async (entries) => {
+              for (const e2 of entries) await processEntry(e2);
+              resolve();
+            });
+          } else resolve();
+        });
       };
-      next();
-    });
+      const promises = [];
+      for (const item of items) {
+        const entry = item.webkitGetAsEntry?.();
+        if (entry) promises.push(processEntry(entry));
+      }
+      Promise.all(promises).then(() => {
+        setBulkFiles(prev => {
+          const existing = new Set(prev.map(f => f.name + f.size));
+          const newFiles = videos.filter(f => !existing.has(f.name + f.size));
+          return [...prev, ...newFiles];
+        });
+        if (videos.length > 0) showToast(`Added ${videos.length} videos`);
+      });
+    } else {
+      const f = e.dataTransfer.files[0];
+      if (f?.type.startsWith('video/')) handleFileSelect(f);
+    }
+  }, [mode, setBulkFiles]);
 
-    setBulkProgress({ total, done, failed, active: false });
-    if (!abortRef.current) setBulkFiles([]);
-    showToast(failed > 0 ? `${done} queued, ${failed} failed` : `All ${done} queued!`, failed > 0 ? 'error' : 'success');
-  };
-
-  const handleAI = async () => {
-    setAiLoading(true);
+  const generateCaption = async (mediaUrl) => {
+    setLoadingCaption(true);
     try {
-      const res = await axios.post('/api/generate-caption', {});
-      if (mode === 'single') setCaption(res.data.caption);
-      else setBulkCaption(res.data.caption);
-    } catch { showToast('AI caption failed', 'error'); }
-    finally { setAiLoading(false); }
+      const res = await fetch('/api/analyze-frame', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ thumbnailUrl: mediaUrl }),
+      });
+      const data = await res.json();
+      if (data.caption) {
+        setCaption(data.caption);
+        setCaptionScore(scoreCaption(data.caption));
+      }
+    } catch (e) {
+      showToast('Caption generation failed', 'error');
+    } finally {
+      setLoadingCaption(false);
+    }
   };
 
-  const addHashtags = (tags) => {
-    const setter = mode === 'single' ? setCaption : setBulkCaption;
-    setter((prev) => prev + (prev.endsWith('\n') || !prev ? '' : '\n\n') + tags);
+  const uploadFile = async (f, onProgress) => {
+    const formData = new FormData();
+    formData.append('file', f);
+    const res = await fetch('/api/upload-media', { method: 'POST', body: formData });
+    if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+    return res.json();
   };
 
-  const pct = bulkProgress.total > 0 ? Math.round(((bulkProgress.done + bulkProgress.failed) / bulkProgress.total) * 100) : 0;
-  const bulkVideoCount = bulkFiles.filter(f => detectType(f) === 'VIDEO').length;
+  const handleSingleUpload = async (action) => {
+    if (!file) return showToast('Select a video first', 'error');
 
-  // Visible file list for bulk (first 20)
-  const visibleFiles = bulkFiles.slice(0, 20);
-  const cap = mode === 'single' ? caption : bulkCaption;
+    const isModePublish = action === 'publish';
+    if (isModePublish) setPublishing(true);
+    else setQueueing(true);
+
+    try {
+      // Upload
+      showToast('Uploading video...', 'info');
+      const uploadData = await uploadFile(file);
+      if (!uploadData.videoUrl && !uploadData.mediaUrl) throw new Error('Upload failed');
+
+      // Auto-generate caption if empty
+      let finalCaption = caption;
+      if (!finalCaption.trim()) {
+        const thumbnailUrl = uploadData.thumbnailUrl || uploadData.mediaUrl;
+        if (thumbnailUrl) {
+          setLoadingCaption(true);
+          try {
+            const res = await fetch('/api/analyze-frame', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ thumbnailUrl }),
+            });
+            const d = await res.json();
+            finalCaption = d.caption || '';
+            setCaption(finalCaption);
+            setCaptionScore(scoreCaption(finalCaption));
+          } catch {}
+          setLoadingCaption(false);
+        }
+      }
+
+      // Save to DB
+      const saveRes = await fetch('/api/save-post', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          caption: finalCaption,
+          mediaUrl: uploadData.mediaUrl,
+          videoUrl: uploadData.videoUrl,
+          thumbnailUrl: uploadData.thumbnailUrl,
+          mediaType: uploadData.mediaType || 'REELS',
+        }),
+      });
+      const saveData = await saveRes.json();
+      if (!saveData.id) throw new Error('Failed to save post');
+
+      if (isModePublish) {
+        // Immediate publish - uses queue mode to avoid 502
+        showToast('Publishing via queue... will post within 10 min', 'info');
+        await fetch('/api/publish', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            postId: saveData.id,
+            queueMode: true,
+            videoUrl: uploadData.videoUrl,
+            mediaUrl: uploadData.mediaUrl,
+            mediaType: uploadData.mediaType || 'REELS',
+            caption: finalCaption,
+          }),
+        });
+        showToast('Queued! Will be posted within 10 minutes automatically.');
+      } else {
+        showToast('Added to queue! Will post automatically.');
+      }
+
+      setFile(null);
+      setPreview(null);
+      setCaption('');
+      setCaptionScore(null);
+    } catch (err) {
+      showToast(err.message || 'Error occurred', 'error');
+    } finally {
+      setPublishing(false);
+      setQueueing(false);
+    }
+  };
+
+  const handleBulkQueue = async () => {
+    if (bulkFiles.length === 0) return showToast('Drop some videos first', 'error');
+    const total = bulkFiles.length;
+    setBulkProgress({ total, done: 0, running: true });
+    let done = 0;
+
+    const CONCURRENCY = 2;
+    const queue = [...bulkFiles];
+    const statusMap = {};
+    bulkFiles.forEach(f => { statusMap[f.name + f.size] = 'pending'; });
+    setFileStatuses({ ...statusMap });
+
+    const worker = async () => {
+      while (queue.length > 0) {
+        const f = queue.shift();
+        const key = f.name + f.size;
+        setFileStatuses(prev => ({ ...prev, [key]: 'uploading' }));
+        try {
+          const uploadData = await uploadFile(f);
+          let cap = '';
+          if (uploadData.thumbnailUrl || uploadData.mediaUrl) {
+            try {
+              const r = await fetch('/api/analyze-frame', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ thumbnailUrl: uploadData.thumbnailUrl || uploadData.mediaUrl }),
+              });
+              const d = await r.json();
+              cap = d.caption || '';
+            } catch {}
+          }
+          await fetch('/api/save-post', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              caption: cap,
+              mediaUrl: uploadData.mediaUrl,
+              videoUrl: uploadData.videoUrl,
+              thumbnailUrl: uploadData.thumbnailUrl,
+              mediaType: uploadData.mediaType || 'REELS',
+            }),
+          });
+          setFileStatuses(prev => ({ ...prev, [key]: 'done' }));
+          done++;
+          setBulkProgress(prev => ({ ...prev, done }));
+        } catch (e) {
+          setFileStatuses(prev => ({ ...prev, [key]: 'failed' }));
+          done++;
+          setBulkProgress(prev => ({ ...prev, done }));
+        }
+      }
+    };
+
+    const workers = Array.from({ length: CONCURRENCY }, worker);
+    await Promise.all(workers);
+    setBulkProgress(prev => ({ ...prev, running: false }));
+    showToast(`Queued ${total} videos! Auto-posting will begin.`);
+  };
+
+  const removeBulkFile = (f) => {
+    setBulkFiles(prev => prev.filter(x => x !== f));
+  };
 
   return (
-    <div className="composer fade-in">
+    <div className="composer-wrap">
+      {/* Mode Toggle */}
       <div className="mode-toggle">
-        <button className={`mode-btn ${mode === 'single' ? 'active' : ''}`} onClick={() => setMode('single')}>Single</button>
+        <button className={`mode-btn ${mode === 'single' ? 'active' : ''}`} onClick={() => setMode('single')}>
+          Single
+        </button>
         <button className={`mode-btn ${mode === 'bulk' ? 'active' : ''}`} onClick={() => setMode('bulk')}>
-          Bulk Upload {bulkFiles.length > 0 ? `(${bulkFiles.length})` : ''}
+          Bulk Upload
+          {bulkFiles.length > 0 && <span className="badge">{bulkFiles.length}</span>}
         </button>
       </div>
 
+      {/* Toast */}
+      {toast && (
+        <div className={`toast toast-${toast.type}`}>{toast.msg}</div>
+      )}
+
       {mode === 'single' ? (
-        <div className="composer-grid">
-          <div className="composer-left">
-            <label className="field-label">Video / Image</label>
-            {!mediaPreview ? (
-              <div
-                ref={singleDropRef}
-                className="dropzone"
-                onDragOver={e => e.preventDefault()}
-                onDrop={handleSingleDrop}
-                onClick={() => singleFileInputRef.current?.click()}
-              >
-                <input ref={singleFileInputRef} type="file" accept="video/*,image/*" style={{ display:'none' }} onChange={handleSingleFileInput} />
-                <div className="dropzone-inner">
-                  <div className="dropzone-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="44" height="44">
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-                    </svg>
-                  </div>
-                  <p className="dropzone-text">Drop video or click to browse</p>
-                  <p className="dropzone-hint">MP4, MOV, JPG, PNG — up to 500MB</p>
+        <div className="single-layout">
+          {/* Left: Video Drop */}
+          <div className="media-panel">
+            <div
+              className={`drop-zone ${file ? 'has-file' : ''}`}
+              onDrop={handleDrop}
+              onDragOver={e => e.preventDefault()}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {preview ? (
+                <>
+                  <video src={preview} controls className="preview-video" />
+                  <div className="reel-badge">REEL</div>
+                  <button className="remove-btn" onClick={e => { e.stopPropagation(); setFile(null); setPreview(null); setCaption(''); }}>×</button>
+                </>
+              ) : (
+                <div className="drop-placeholder">
+                  <div className="drop-icon">▶</div>
+                  <p>Drop video here</p>
+                  <p className="drop-sub">or click to browse</p>
                 </div>
-              </div>
-            ) : (
-              <div className="media-preview-wrap">
-                {mediaType === 'VIDEO' ? <video src={mediaPreview} controls className="media-preview" /> : <img src={mediaPreview} alt="" className="media-preview" />}
-                <button className="remove-media" onClick={clearMedia}>✕</button>
-                <span className={`media-badge ${mediaType === 'VIDEO' ? 'video' : ''}`}>{mediaType === 'VIDEO' ? 'REEL' : 'IMAGE'}</span>
-              </div>
-            )}
+              )}
+            </div>
+            <input ref={fileInputRef} type="file" accept="video/*" style={{ display: 'none' }}
+              onChange={e => handleFileSelect(e.target.files[0])} />
           </div>
 
-          <div className="composer-right">
-            <div className="field-group">
-              <div className="field-header">
-                <label className="field-label">Caption</label>
-                <div className="field-actions">
-                  <button className="ai-btn" onClick={handleAI} disabled={aiLoading}>{aiLoading ? 'Working...' : '✦ AI Caption'}</button>
-                  <span className={`char-count ${MAX_CAPTION - caption.length < 100 ? 'warn' : ''}`}>{(MAX_CAPTION - caption.length).toLocaleString()}</span>
-                </div>
+          {/* Right: Caption */}
+          <div className="caption-panel">
+            <div className="caption-header">
+              <span className="label">CAPTION</span>
+              <div className="caption-actions">
+                {caption && <span className="char-count">{caption.length}</span>}
+                <button
+                  className="ai-btn"
+                  disabled={!file || loadingCaption}
+                  onClick={async () => {
+                    if (!file) return;
+                    const fd = new FormData();
+                    fd.append('file', file);
+                    setLoadingCaption(true);
+                    try {
+                      const up = await fetch('/api/upload-media', { method: 'POST', body: fd });
+                      const ud = await up.json();
+                      await generateCaption(ud.thumbnailUrl || ud.mediaUrl);
+                    } catch { showToast('Failed', 'error'); }
+                    setLoadingCaption(false);
+                  }}
+                >
+                  {loadingCaption ? '...' : '✦ AI Caption'}
+                </button>
               </div>
-              <textarea className="caption-input" placeholder="Write a caption or leave blank — AI will analyze the first frame..." value={caption} onChange={e => setCaption(e.target.value.slice(0, MAX_CAPTION))} rows={7} />
-              {captionQuality.level !== 'none' && (
-                <div className="caption-quality"><span className={`quality-dot ${captionQuality.level}`} /><span className="text-dim">{captionQuality.label}</span></div>
-              )}
-              <div className="hashtag-presets">{HASHTAG_PRESETS.map(p => <button key={p.label} className="preset-btn" onClick={() => addHashtags(p.tags)}>{p.label}</button>)}</div>
             </div>
-            <div className="template-section">
-              <label className="field-label">Caption Templates</label>
-              <div className="template-row">{CAPTION_TEMPLATES.map(t => <button key={t.label} className="template-btn" onClick={() => t.text && (mode === 'single' ? setCaption(t.text) : setBulkCaption(t.text))}>{t.label}</button>)}</div>
+
+            <textarea
+              className="caption-input"
+              value={caption}
+              onChange={e => { setCaption(e.target.value); setCaptionScore(scoreCaption(e.target.value)); }}
+              placeholder="Write caption or click AI Caption to generate from video..."
+              rows={6}
+            />
+
+            {captionScore !== null && (
+              <div className={`score-bar ${captionScore >= 70 ? 'strong' : captionScore >= 40 ? 'ok' : 'weak'}`}>
+                <span className="score-dot" />
+                {captionScore >= 70 ? 'Strong caption' : captionScore >= 40 ? 'Good caption' : 'Weak caption'}
+              </div>
+            )}
+
+            <div className="tag-row">
+              {CATEGORY_TAGS.map(t => (
+                <button key={t} className="tag-chip"
+                  onClick={() => setCaption(prev => prev + (prev ? '\n' : '') + '#' + t.toLowerCase().replace(/\s/g, ''))}>
+                  {t}
+                </button>
+              ))}
             </div>
-            {loading && <div className="loading-bar"><span className="spinner" /> {loadingStep}</div>}
+
+            <div className="label" style={{ marginTop: '16px' }}>TEMPLATES</div>
+            <div className="tag-row">
+              {CAPTION_TEMPLATES.map(t => (
+                <button key={t} className="tag-chip template-chip"
+                  onClick={() => {
+                    const templates = {
+                      'Hook + CTA': 'pov: you found the best deal\nget it before it sells out\nlink in bio.\n#deals #ascenddeals #sale',
+                      'Before/After': 'before vs after using this product\nyou will not believe the difference\nlink in bio.\n#transformation #deals #ascenddeals',
+                      'Problem/Solution': 'struggling with this?\nthis is the solution nobody talks about\nlink in bio.\n#deals #ascenddeals #tips',
+                      'Social Proof': 'everyone is getting this right now\nand for good reason\nlink in bio.\n#deals #ascenddeals #trending',
+                      'Urgency': 'this price drops in 24 hours\nget it now before it is gone\nlink in bio.\n#deals #ascenddeals #sale',
+                    };
+                    setCaption(templates[t] || '');
+                    setCaptionScore(scoreCaption(templates[t] || ''));
+                  }}>
+                  {t}
+                </button>
+              ))}
+            </div>
+
+            <p className="caption-hint">Leave blank — AI will generate from first frame automatically</p>
+
             <div className="action-row">
-              <button className="btn-primary" onClick={handlePublishNow} disabled={loading || !mediaFile}>{loading ? 'Publishing...' : 'Publish Now'}</button>
-              <button className="btn-secondary" onClick={handleAddToQueue} disabled={loading || !mediaFile}>Add to Queue</button>
+              <button
+                className="btn-primary"
+                disabled={publishing || !file}
+                onClick={() => handleSingleUpload('publish')}
+              >
+                {publishing ? 'Queueing...' : 'Publish Now'}
+              </button>
+              <button
+                className="btn-secondary"
+                disabled={queueing || !file}
+                onClick={() => handleSingleUpload('queue')}
+              >
+                {queueing ? 'Saving...' : 'Add to Queue'}
+              </button>
             </div>
-            <p className="hint" style={{marginTop:8}}>Leave caption blank and AI will analyze the video's first frame automatically.</p>
           </div>
         </div>
       ) : (
         <div className="bulk-layout">
-          <div className="bulk-left">
-            <label className="field-label">Drop a folder or select files (up to {MAX_FILES.toLocaleString()})</label>
-            <div
-              ref={bulkDropRef}
-              className={`dropzone dropzone-bulk ${isDragging ? 'drag-active' : ''}`}
-              onDragEnter={e => { e.preventDefault(); setIsDragging(true); }}
-              onDragLeave={e => { e.preventDefault(); if (!bulkDropRef.current?.contains(e.relatedTarget)) setIsDragging(false); }}
-              onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect='copy'; }}
-              onDrop={handleBulkDrop}
-            >
-              <div className="dropzone-inner">
-                <div className="dropzone-icon">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="40" height="40">
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                  </svg>
-                </div>
-                {isDragging ? <p className="dropzone-text" style={{color:'white'}}>Drop now!</p> : (
-                  <>
-                    <p className="dropzone-text">Drop a folder containing your videos</p>
-                    <p className="dropzone-hint">Entire folder scanned — subfolders included</p>
-                  </>
-                )}
-              </div>
-            </div>
-
-            <div className="bulk-browse-row">
-              <input ref={bulkFileInputRef} type="file" accept="video/*,image/*" multiple style={{display:'none'}} onChange={handleBulkFileInput} />
-              <button className="btn-ghost" onClick={() => bulkFileInputRef.current?.click()} disabled={bulkProgress.active}>Browse Files</button>
-              <span className="text-dim" style={{fontSize:12}}>or drag a folder above</span>
-            </div>
-
-            {bulkFiles.length > 0 && (
-              <>
-                <div className="upload-stats">
-                  <div className="upload-stat"><strong>{bulkFiles.length}</strong> files</div>
-                  <div className="upload-stat"><strong>{bulkVideoCount}</strong> videos</div>
-                  <div className="upload-stat"><strong>{formatBytes(bulkFiles.reduce((a,f)=>a+(f.size||0),0))}</strong></div>
-                </div>
-                <div className="bulk-info">
-                  <span className="text-dim">{bulkFiles.length} file{bulkFiles.length!==1?'s':''} ready</span>
-                  <button className="text-btn danger" onClick={() => { setBulkFiles([]); setFileStatus({}); }}>Clear all</button>
-                </div>
-
-                {/* File list with status */}
-                <div className="bulk-file-list">
-                  {visibleFiles.map((f, i) => {
-                    const key = f.name + f.size;
-                    const st = fileStatus[key] || 'pending';
-                    return (
-                      <div key={i} className={`bulk-file-row ${st}`}>
-                        <span className="bulk-file-icon">{detectType(f)==='VIDEO' ? '▶' : '🖼'}</span>
-                        <span className="bulk-file-name">{f.name.length > 32 ? f.name.slice(0,29)+'...' : f.name}</span>
-                        <span className="bulk-file-size">{formatBytes(f.size)}</span>
-                        <span className={`bulk-file-status ${st}`}>
-                          {st === 'pending' ? '·' : st === 'uploading' ? <span className="spinner-sm"/> : st === 'done' ? '✓' : '✕'}
-                        </span>
-                      </div>
-                    );
-                  })}
-                  {bulkFiles.length > 20 && <div className="bulk-more">+{bulkFiles.length-20} more files</div>}
-                </div>
-              </>
-            )}
+          <div
+            className="bulk-drop-zone"
+            ref={dropRef}
+            onDrop={handleDrop}
+            onDragOver={e => e.preventDefault()}
+            onClick={() => bulkInputRef.current?.click()}
+          >
+            <div className="drop-icon">📁</div>
+            <p>Drop a folder or videos here</p>
+            <p className="drop-sub">Supports up to 1000 videos — subfolders included</p>
+            <input ref={bulkInputRef} type="file" accept="video/*" multiple style={{ display: 'none' }}
+              onChange={e => {
+                const newFiles = Array.from(e.target.files).filter(f => f.type.startsWith('video/'));
+                setBulkFiles(prev => {
+                  const existing = new Set(prev.map(f => f.name + f.size));
+                  return [...prev, ...newFiles.filter(f => !existing.has(f.name + f.size))];
+                });
+              }} />
           </div>
 
-          <div className="bulk-right">
-            <div className="field-group">
-              <div className="field-header">
-                <label className="field-label">Caption (all posts)</label>
-                <button className="ai-btn" onClick={handleAI} disabled={aiLoading}>{aiLoading ? '...' : '✦ AI'}</button>
+          {bulkFiles.length > 0 && (
+            <div className="bulk-file-list">
+              <div className="bulk-list-header">
+                <span>{bulkFiles.length} videos ready</span>
+                <button className="clear-btn" onClick={() => { setBulkFiles([]); setFileStatuses({}); }}>Clear all</button>
               </div>
-              <textarea className="caption-input" placeholder="Leave blank — AI analyzes each video's first frame and writes a unique caption..." value={bulkCaption} onChange={e => setBulkCaption(e.target.value.slice(0,MAX_CAPTION))} rows={5} />
-              <div className="hashtag-presets">{HASHTAG_PRESETS.map(p => <button key={p.label} className="preset-btn" onClick={() => addHashtags(p.tags)}>{p.label}</button>)}</div>
-            </div>
+              <div className="bulk-scroll">
+                {bulkFiles.map((f, i) => {
+                  const key = f.name + f.size;
+                  const status = fileStatuses[key] || 'pending';
+                  return (
+                    <div key={key} className={`bulk-file-row bulk-${status}`}>
+                      <span className="file-num">{i + 1}</span>
+                      <span className="file-name">{f.name}</span>
+                      <span className="file-size">{(f.size / 1024 / 1024).toFixed(1)}MB</span>
+                      <span className="file-status">
+                        {status === 'pending' && '·'}
+                        {status === 'uploading' && <span className="spinner" />}
+                        {status === 'done' && '✓'}
+                        {status === 'failed' && '✕'}
+                      </span>
+                      {status === 'pending' && (
+                        <button className="remove-file-btn" onClick={() => removeBulkFile(f)}>×</button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
 
-            <p className="hint">Files stay here even if you switch tabs. Leave caption blank for per-video AI captions.</p>
-
-            {(bulkProgress.active || bulkProgress.total > 0) && (
-              <div className="progress-section">
-                <div className="progress-track"><div className="progress-fill" style={{width:`${pct}%`}} /></div>
-                <div className="progress-info">
-                  <span>{bulkProgress.done}/{bulkProgress.total} queued</span>
-                  {bulkProgress.failed > 0 && <span className="text-red">{bulkProgress.failed} failed</span>}
-                  <span>{pct}%</span>
-                  {!bulkProgress.active && bulkProgress.done > 0 && <span style={{color:'var(--green)'}}>✓ Done</span>}
+              {bulkProgress?.running && (
+                <div className="progress-bar-wrap">
+                  <div className="progress-bar-track">
+                    <div
+                      className="progress-bar-fill"
+                      style={{ width: bulkProgress.total > 0 ? `${(bulkProgress.done / bulkProgress.total) * 100}%` : '0%' }}
+                    />
+                  </div>
+                  <span className="progress-text">{bulkProgress.done} / {bulkProgress.total}</span>
                 </div>
-              </div>
-            )}
-
-            <div className="action-row">
-              {bulkProgress.active ? (
-                <button className="btn-danger" onClick={() => { abortRef.current = true; }}>Cancel</button>
-              ) : (
-                <button className="btn-primary" onClick={handleBulkUpload} disabled={bulkFiles.length === 0}>
-                  Queue {bulkFiles.length > 0 ? bulkFiles.length.toLocaleString() : ''} File{bulkFiles.length !== 1 ? 's' : ''}
-                </button>
               )}
+
+              <button
+                className="btn-primary bulk-queue-btn"
+                disabled={bulkProgress?.running}
+                onClick={handleBulkQueue}
+              >
+                {bulkProgress?.running
+                  ? `Uploading ${bulkProgress.done}/${bulkProgress.total}...`
+                  : `Queue ${bulkFiles.length} Videos`}
+              </button>
             </div>
-          </div>
+          )}
         </div>
       )}
     </div>
