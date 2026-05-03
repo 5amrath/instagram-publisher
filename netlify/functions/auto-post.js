@@ -30,13 +30,13 @@ exports.handler = async (event) => {
       return { statusCode: 200, body: JSON.stringify({ message: 'Daily limit reached' }) };
     }
 
-    // Lock next pending post atomically
+    // Lock next pending post atomically (also pick up stuck scheduled posts older than 10 min)
     const lockResult = await query(`
-      UPDATE posts
-      SET status = 'scheduled'
+      UPDATE posts SET status = 'scheduled', error_message = NULL
       WHERE id = (
         SELECT id FROM posts
         WHERE status = 'pending'
+           OR (status = 'scheduled' AND created_at < NOW() - INTERVAL '10 minutes')
         ORDER BY created_at ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED
@@ -54,65 +54,82 @@ exports.handler = async (event) => {
 
     let caption = post.caption;
 
-    // If no caption, analyze the first frame of the video for a viral caption
+    // Generate caption from first frame if blank
     if (!caption || caption.trim() === '') {
       if (post.thumbnail_url) {
         console.log('[auto-post] Analyzing first frame for caption...');
         caption = await analyzeFrame(post.thumbnail_url);
-        console.log('[auto-post] AI caption:', caption.substring(0, 60) + '...');
       } else {
         caption = generateFallbackCaption();
       }
     }
 
-    // Determine if video (Reels) or image
-    const isVideo = post.media_type === 'VIDEO' || post.media_type === 'REELS';
+    const isVideo = post.media_type === 'VIDEO' || post.media_type === 'REELS' || !post.media_type;
+    const mediaUrl = post.video_url || post.media_url;
 
-    // Create Instagram media container
+    // Build container params
     const containerParams = new URLSearchParams({ access_token: token, caption });
-
     if (isVideo) {
       containerParams.set('media_type', 'REELS');
-      containerParams.set('video_url', post.media_url);
+      containerParams.set('video_url', mediaUrl);
     } else {
-      containerParams.set('image_url', post.media_url);
+      containerParams.set('image_url', mediaUrl);
     }
 
+    // Step 1: Create media container
+    console.log('[auto-post] Creating media container...');
     const containerRes = await igRequest(`/${userId}/media?${containerParams}`, 'POST');
     const containerId = containerRes.id;
-    if (!containerId) throw new Error('No container ID returned from Instagram');
+    if (!containerId) throw new Error('No container ID returned');
 
-    // Wait for processing
-    await waitForContainer(containerId, token, isVideo ? 60 : 15);
+    // Step 2: For videos, poll status (max 20s to fit within 26s limit)
+    if (isVideo) {
+      console.log('[auto-post] Waiting for container to process...');
+      let ready = false;
+      for (let i = 0; i < 6; i++) {
+        await sleep(3000);
+        try {
+          const s = await igRequest(`/${containerId}?fields=status_code&access_token=${token}`);
+          console.log(`[auto-post] Container status: ${s.status_code}`);
+          if (s.status_code === 'FINISHED' || s.status_code === 'PUBLISHED') { ready = true; break; }
+          if (s.status_code === 'ERROR') throw new Error('Instagram media processing failed');
+        } catch (e) {
+          if (e.message.includes('processing failed')) throw e;
+          // Ignore transient errors and retry
+        }
+      }
+      // Attempt publish even if not FINISHED (Instagram usually accepts it)
+      console.log(`[auto-post] Container ready: ${ready}. Attempting publish...`);
+    }
 
-    // Publish
+    // Step 3: Publish
     const publishRes = await igRequest(
       `/${userId}/media_publish?creation_id=${containerId}&access_token=${token}`,
       'POST'
     );
 
-    // Update DB
+    // Step 4: Update DB
     await query(
       `UPDATE posts SET status = 'posted', posted_at = NOW(), caption = $2, ig_post_id = $3 WHERE id = $1`,
       [post.id, caption, publishRes.id || null]
     );
 
-    console.log(`[auto-post] Published ${post.id} -> IG ${publishRes.id}`);
-    return { statusCode: 200, body: JSON.stringify({ message: 'Posted', postId: post.id }) };
+    console.log(`[auto-post] Successfully posted ${post.id} -> IG ${publishRes.id}`);
+    return { statusCode: 200, body: JSON.stringify({ message: 'Posted', postId: post.id, igId: publishRes.id }) };
 
   } catch (err) {
     console.error('[auto-post] Error:', err.message);
 
     if (post && post.id) {
       try {
+        const retryResult = await query(`SELECT retry_count FROM posts WHERE id = $1`, [post.id]);
+        const currentRetries = retryResult.rows[0]?.retry_count || 0;
+        const newStatus = currentRetries >= 3 ? 'failed' : 'pending';
         await query(
-          `UPDATE posts
-           SET retry_count = retry_count + 1,
-               error_message = $2,
-               status = CASE WHEN retry_count >= 2 THEN 'failed' ELSE 'pending' END
-           WHERE id = $1`,
-          [post.id, err.message]
+          `UPDATE posts SET retry_count = retry_count + 1, error_message = $2, status = $3 WHERE id = $1`,
+          [post.id, err.message.substring(0, 500), newStatus]
         );
+        console.log(`[auto-post] Post ${post.id} set to ${newStatus} (retry ${currentRetries + 1})`);
       } catch (dbErr) {
         console.error('[auto-post] DB update failed:', dbErr.message);
       }
@@ -122,9 +139,10 @@ exports.handler = async (event) => {
   }
 };
 
-/**
- * Analyze video thumbnail with GPT-4o-mini vision for a viral Reels caption
- */
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
 async function analyzeFrame(imageUrl) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return generateFallbackCaption();
@@ -135,38 +153,31 @@ async function analyzeFrame(imageUrl) {
       messages: [
         {
           role: 'system',
-          content: `You write Instagram Reels captions for @ascend.deals â a male self-improvement and affiliate deals account focused on looksmaxxing, skincare, grooming, and lifestyle products.
+          content: `You write Instagram Reels captions for @ascend.deals - a male self-improvement and deals account focused on looksmaxxing, skincare, grooming, and lifestyle products.
 
 RULES:
-- First line MUST be a short punchy hook (under 10 words). This is what people see before "...more"
-- Hook styles: "This is why you're not ___", "Stop doing ___ wrong", "The ___ nobody talks about", "You need this if ___", "POV: you finally ___", "This changed everything"
-- After the hook: 1-2 short lines of value or intrigue
-- End with "Link in bio" or "Check bio"
-- Then 6-8 hashtags on a new line
-- NO emojis. NO exclamation marks. Lowercase energy
-- Sound like a real person not a brand
-- Total caption under 120 words
-- Always include #ascenddeals in hashtags
-- Mix broad (#fyp #viral) with niche (#looksmax #skincare #mog)`,
+- First line: short punchy hook under 10 words. Examples: "this is why you look the same", "stop skipping this", "the product nobody talks about", "POV: you finally found what works"
+- 1-2 lines of value/intrigue after
+- End with "link in bio"
+- Then 6-8 hashtags: mix #fyp #viral with niche tags
+- NO emojis. NO exclamation marks. Lowercase only
+- Sound like a real person, not a brand
+- Always include #ascenddeals`,
         },
         {
           role: 'user',
           content: [
-            { type: 'text', text: 'Look at this video frame. Identify what the product or topic is. Write a Reels caption with a scroll-stopping hook.' },
+            { type: 'text', text: 'Identify the product or topic in this frame. Write a viral Reels caption with a scroll-stopping hook.' },
             { type: 'image_url', image_url: { url: imageUrl, detail: 'low' } },
           ],
         },
       ],
-      max_tokens: 250,
-      temperature: 0.9,
+      max_tokens: 200,
+      temperature: 0.85,
     });
 
     const result = await callOpenAI(apiKey, payload);
-
-    if (result.choices?.[0]?.message?.content) {
-      return result.choices[0].message.content.trim();
-    }
-    return generateFallbackCaption();
+    return result.choices?.[0]?.message?.content?.trim() || generateFallbackCaption();
   } catch (err) {
     console.error('[auto-post] Frame analysis failed:', err.message);
     return generateFallbackCaption();
@@ -177,34 +188,28 @@ function generateFallbackCaption() {
   const hooks = [
     "this is why you look the same every month",
     "stop skipping this in your routine",
-    "the one product that actually changed my skin",
+    "the one product that actually changed everything",
     "nobody talks about this but it works",
-    "you need this if you're serious about your glow up",
     "POV: you finally found what works",
-    "this is the difference between trying and results",
     "your routine is missing this one thing",
-    "the product everyone is sleeping on right now",
-    "this is what separates average from elite",
+    "the product everyone is sleeping on",
+    "this is what separates average from results",
   ];
-
   const bodies = [
     "most people overlook this. don't be most people.",
     "the results speak for themselves.",
     "once you try it you won't go back.",
     "every detail matters when you're leveling up.",
-    "this is what consistency looks like.",
   ];
-
   const tagSets = [
     "#looksmax #skincare #glowup #mog #ascenddeals #fyp #viral #selfcare",
-    "#looksmax #grooming #selfimprovement #mog #ascenddeals #fyp #trending #skincare",
-    "#skincare #looksmaxxing #deals #glowup #ascenddeals #fyp #viral #routine",
+    "#looksmaxxing #grooming #selfimprovement #mog #ascenddeals #fyp #trending #skincare",
+    "#skincare #deals #glowup #ascenddeals #fyp #viral #routine #mog",
   ];
-
-  const hook = hooks[Math.floor(Math.random() * hooks.length)];
-  const body = bodies[Math.floor(Math.random() * bodies.length)];
-  const tags = tagSets[Math.floor(Math.random() * tagSets.length)];
-  return `${hook}\n\n${body}\n\nlink in bio\n\n${tags}`;
+  const h = hooks[Math.floor(Math.random() * hooks.length)];
+  const b = bodies[Math.floor(Math.random() * bodies.length)];
+  const t = tagSets[Math.floor(Math.random() * tagSets.length)];
+  return `${h}\n\n${b}\n\nlink in bio\n\n${t}`;
 }
 
 function callOpenAI(apiKey, payload) {
@@ -227,13 +232,13 @@ function callOpenAI(apiKey, payload) {
       });
     });
     req.on('error', reject);
-    req.setTimeout(25000, () => { req.destroy(); reject(new Error('OpenAI timeout')); });
+    req.setTimeout(20000, () => { req.destroy(); reject(new Error('OpenAI timeout')); });
     req.write(payload);
     req.end();
   });
 }
 
-async function igRequest(path, method = 'GET') {
+function igRequest(path, method = 'GET') {
   return new Promise((resolve, reject) => {
     const req = https.request({
       hostname: IG_BASE,
@@ -246,23 +251,13 @@ async function igRequest(path, method = 'GET') {
       res.on('end', () => {
         try {
           const p = JSON.parse(data);
-          if (p.error) reject(new Error(p.error.message));
+          if (p.error) reject(new Error(p.error.message || JSON.stringify(p.error)));
           else resolve(p);
-        } catch { reject(new Error('Invalid IG response')); }
+        } catch { reject(new Error('Invalid IG response: ' + data.substring(0, 100))); }
       });
     });
     req.on('error', reject);
-    req.setTimeout(60000, () => { req.destroy(); reject(new Error('IG timeout')); });
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error('IG request timeout')); });
     req.end();
   });
-}
-
-async function waitForContainer(id, token, maxAttempts = 30) {
-  for (let i = 0; i < maxAttempts; i++) {
-    const s = await igRequest(`/${id}?fields=status_code&access_token=${token}`);
-    if (s.status_code === 'FINISHED') return;
-    if (s.status_code === 'ERROR') throw new Error('Instagram media processing failed');
-    await new Promise((r) => setTimeout(r, 5000));
-  }
-  throw new Error('Video processing timed out. Try a shorter or smaller video.');
 }
