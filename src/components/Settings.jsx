@@ -4,9 +4,12 @@ import axios from 'axios';
 const LIMITS = [10, 15, 20, 25, 30, 40, 50];
 
 export default function Settings({ showToast }) {
-  const [limit,   setLimit]   = useState(25);
-  const [saving,  setSaving]  = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [limit,        setLimit]        = useState(25);
+  const [saving,       setSaving]       = useState(false);
+  const [loading,      setLoading]      = useState(true);
+  const [shortToken,   setShortToken]   = useState('');
+  const [refreshing,   setRefreshing]   = useState(false);
+  const [newToken,     setNewToken]     = useState('');
 
   useEffect(() => {
     (async () => {
@@ -28,6 +31,28 @@ export default function Settings({ showToast }) {
       showToast('Failed to save', 'error');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRefreshToken = async () => {
+    if (!shortToken.trim()) return showToast('Paste your short-lived token first', 'error');
+    setRefreshing(true);
+    setNewToken('');
+    try {
+      const res = await axios.post('/.netlify/functions/refresh-token', { shortToken: shortToken.trim() });
+      if (res.data.pageToken) {
+        setNewToken(res.data.pageToken);
+        showToast('Got 60-day token! Copy it and update in Netlify env vars.', 'success');
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message;
+      if (msg.includes('FACEBOOK_APP_SECRET')) {
+        showToast('Add FACEBOOK_APP_ID and FACEBOOK_APP_SECRET to Netlify env vars first', 'error');
+      } else {
+        showToast('Error: ' + msg, 'error');
+      }
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -86,13 +111,43 @@ export default function Settings({ showToast }) {
         </div>
       </div>
 
-      {/* Token reminder */}
+      {/* Token refresh */}
       <div className="card">
-        <div className="card-header"><h3 className="card-title">Access Token</h3></div>
-        <p className="text-dim">
-          Your Instagram Page token is long-lived and won't expire unless your Facebook password changes.
-          If you see "Session expired" errors, generate a new Page token from the Graph API Explorer and update it in Netlify env vars.
+        <div className="card-header"><h3 className="card-title">Refresh Instagram Token</h3></div>
+        <p className="text-dim mb-12">
+          If posts are failing with "Session expired", generate a new short-lived token from the{' '}
+          <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener noreferrer" style={{color:'var(--t2)'}}>Graph API Explorer</a>
+          {' '}and paste it below. This will exchange it for a 60-day token.
         </p>
+        <p className="text-dim mb-12" style={{fontSize:11}}>
+          Requires: FACEBOOK_APP_ID and FACEBOOK_APP_SECRET in Netlify env vars (from developers.facebook.com → App Settings → Basic).
+        </p>
+        <textarea
+          className="caption-input"
+          placeholder="Paste short-lived user token from Graph API Explorer..."
+          value={shortToken}
+          onChange={e => setShortToken(e.target.value)}
+          rows={3}
+          style={{fontSize:12, fontFamily:'monospace'}}
+        />
+        <div className="action-row" style={{marginTop:10}}>
+          <button className="btn-primary" onClick={handleRefreshToken} disabled={refreshing || !shortToken.trim()}>
+            {refreshing ? <><span className="spinner" style={{marginRight:8}} /> Exchanging...</> : 'Get 60-Day Token'}
+          </button>
+        </div>
+        {newToken && (
+          <div style={{marginTop:14}}>
+            <p className="text-dim mb-12" style={{color:'var(--green)'}}>✓ 60-day Page token generated. Copy it and update INSTAGRAM_ACCESS_TOKEN in Netlify → Site configuration → Environment variables:</p>
+            <textarea
+              className="caption-input"
+              value={newToken}
+              readOnly
+              rows={3}
+              style={{fontSize:11, fontFamily:'monospace'}}
+              onFocus={e => e.target.select()}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
