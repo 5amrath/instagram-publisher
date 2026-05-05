@@ -1,77 +1,104 @@
 const https = require('https');
 
-// This function exchanges a short-lived user token for a 60-day long-lived token
-// then gets the permanent Page access token from it
-// Requires: FACEBOOK_APP_ID, FACEBOOK_APP_SECRET env vars
+function httpsGet(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let raw = '';
+      res.on('data', chunk => raw += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(raw)); }
+        catch (e) { reject(new Error('Parse error: ' + raw.substring(0, 200))); }
+      });
+    }).on('error', reject);
+  });
+}
 
 exports.handler = async (event) => {
-  const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
+  const headers = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Content-Type': 'application/json',
+  };
 
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 204, headers };
-  }
+  if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers, body: '' };
+  if (event.httpMethod !== 'POST') return { statusCode: 405, headers, body: JSON.stringify({ error: 'Method not allowed' }) };
 
-  const appId = process.env.FACEBOOK_APP_ID;
-  const appSecret = process.env.FACEBOOK_APP_SECRET;
+  const APP_ID = process.env.FACEBOOK_APP_ID;
+  const APP_SECRET = process.env.FACEBOOK_APP_SECRET;
 
-  if (!appId || !appSecret) {
+  if (!APP_ID || !APP_SECRET) {
     return {
-      statusCode: 400,
+      statusCode: 500,
       headers,
-      body: JSON.stringify({ error: 'FACEBOOK_APP_ID and FACEBOOK_APP_SECRET env vars required. Add them in Netlify environment variables.' }),
+      body: JSON.stringify({ error: 'FACEBOOK_APP_ID and FACEBOOK_APP_SECRET env vars not set' }),
     };
   }
 
-  let body;
+  let shortLivedToken = '';
   try {
-    body = JSON.parse(event.body || '{}');
-  } catch {
-    return { statusCode: 400, headers, body: JSON.stringify({ error: 'Invalid JSON body' }) };
+    const body = JSON.parse(event.body || '{}');
+    shortLivedToken = (body.token || '').trim();
+  } catch (_) {}
+
+  // If no token provided, try to use a self-refresh with the current page token
+  // by exchanging it using the app credentials
+  if (!shortLivedToken) {
+    const currentToken = process.env.INSTAGRAM_ACCESS_TOKEN;
+    if (!currentToken) {
+      return { statusCode: 400, headers, body: JSON.stringify({ error: 'No token provided and no current token set' }) };
+    }
+    shortLivedToken = currentToken;
   }
 
-  const shortToken = body.shortToken;
-  if (!shortToken) {
-    return {
-      statusCode: 400,
-      headers,
-      body: JSON.stringify({ error: 'shortToken required in request body' }),
-    };
-  }
-
   try {
-    // Step 1: Exchange short-lived user token for long-lived user token (60 days)
-    const exchangeUrl = `/v21.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${appId}&client_secret=${appSecret}&fb_exchange_token=${encodeURIComponent(shortToken)}`;
-    const longLivedRes = await igRequest(exchangeUrl);
+    // Step 1: Exchange for a long-lived user token (60 days)
+    const exchangeUrl = `https://graph.facebook.com/v21.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${APP_ID}&client_secret=${APP_SECRET}&fb_exchange_token=${shortLivedToken}`;
+    const exchangeData = await httpsGet(exchangeUrl);
 
-    if (!longLivedRes.access_token) {
-      throw new Error('Failed to get long-lived token: ' + JSON.stringify(longLivedRes));
+    if (exchangeData.error) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: 'Token exchange failed: ' + JSON.stringify(exchangeData.error) }),
+      };
     }
 
-    const longLivedToken = longLivedRes.access_token;
-    const expiresIn = longLivedRes.expires_in; // ~5184000 seconds = 60 days
+    const longLivedUserToken = exchangeData.access_token;
+    const expiresIn = exchangeData.expires_in; // seconds
 
-    // Step 2: Get Page token using the long-lived user token (Page tokens are permanent)
-    const pagesRes = await igRequest(`/v21.0/me/accounts?fields=access_token,name,id&access_token=${longLivedToken}`);
+    // Step 2: Get Page access token from me/accounts
+    const accountsUrl = `https://graph.facebook.com/v21.0/me/accounts?fields=access_token,name,id&access_token=${longLivedUserToken}`;
+    const accountsData = await httpsGet(accountsUrl);
 
-    if (!pagesRes.data || !pagesRes.data.length) {
-      throw new Error('No pages found. Make sure your Facebook account has a Page linked.');
+    if (accountsData.error || !accountsData.data || accountsData.data.length === 0) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: 'Failed to get page token: ' + JSON.stringify(accountsData) }),
+      };
     }
 
-    const pageToken = pagesRes.data[0].access_token;
-    const pageName = pagesRes.data[0].name;
+    // Find the Ascend Deals page
+    const page = accountsData.data.find(p => p.name && p.name.toLowerCase().includes('ascend')) || accountsData.data[0];
+    const pageToken = page.access_token;
+    const pageName = page.name;
+
+    const expiryDays = expiresIn ? Math.round(expiresIn / 86400) : 60;
 
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
-        message: `Got permanent Page token for "${pageName}". Update INSTAGRAM_ACCESS_TOKEN in Netlify env vars.`,
         pageToken,
         pageName,
-        longLivedToken,
-        expiresInDays: Math.round(expiresIn / 86400),
+        longLivedUserToken,
+        expiresInDays: expiryDays,
+        message: `Got ${expiryDays}-day token for ${pageName}. Copy the pageToken and update INSTAGRAM_ACCESS_TOKEN in Netlify, then redeploy.`,
+        allPages: accountsData.data.map(p => ({ name: p.name, id: p.id })),
       }),
     };
+
   } catch (err) {
     return {
       statusCode: 500,
@@ -80,23 +107,3 @@ exports.handler = async (event) => {
     };
   }
 };
-
-function igRequest(path) {
-  return new Promise((resolve, reject) => {
-    const req = https.request({
-      hostname: 'graph.facebook.com',
-      path,
-      method: 'GET',
-    }, (res) => {
-      let data = '';
-      res.on('data', (c) => { data += c; });
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch { reject(new Error('Bad response: ' + data.substring(0, 100))); }
-      });
-    });
-    req.on('error', reject);
-    req.setTimeout(15000, () => { req.destroy(); reject(new Error('Timeout')); });
-    req.end();
-  });
-}
