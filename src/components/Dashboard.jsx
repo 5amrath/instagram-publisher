@@ -1,19 +1,22 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 export default function Dashboard() {
-  const [stats, setStats] = useState({ total: 0, pending: 0, posted: 0, failed: 0, scheduled: 0 });
+  const [stats, setStats] = useState({ total: 0, pending: 0, posted: 0, failed: 0, scheduled: 0, postedToday: 0, dailyLimit: 25 });
   const [postCount, setPostCount] = useState(5);
   const [isPosting, setIsPosting] = useState(false);
-  const [postResult, setPostResult] = useState(null);
+  const [postLog, setPostLog] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [lastRefresh, setLastRefresh] = useState(null);
+  const intervalRef = useRef(null);
 
   const fetchStats = async () => {
     try {
       const res = await fetch('/.netlify/functions/get-queue-stats');
       const data = await res.json();
       setStats(data);
+      setLastRefresh(new Date());
     } catch (e) {
-      console.error('Failed to fetch stats', e);
+      console.error(e);
     } finally {
       setLoading(false);
     }
@@ -21,14 +24,22 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchStats();
-    const interval = setInterval(fetchStats, 30000);
-    return () => clearInterval(interval);
+    intervalRef.current = setInterval(fetchStats, 15000);
+    return () => clearInterval(intervalRef.current);
   }, []);
 
-  const handleForcePost = async () => {
+  // While posting, refresh stats every 5s
+  useEffect(() => {
+    if (isPosting) {
+      const t = setInterval(fetchStats, 5000);
+      return () => clearInterval(t);
+    }
+  }, [isPosting]);
+
+  const handlePost = async () => {
     if (isPosting) return;
     setIsPosting(true);
-    setPostResult(null);
+    setPostLog([]);
     try {
       const res = await fetch('/.netlify/functions/force-post', {
         method: 'POST',
@@ -36,151 +47,129 @@ export default function Dashboard() {
         body: JSON.stringify({ count: postCount }),
       });
       const data = await res.json();
-      setPostResult(data);
-      // Refresh stats after posting
-      setTimeout(fetchStats, 2000);
+      setPostLog(data.results || []);
+      fetchStats();
     } catch (e) {
-      setPostResult({ message: 'Error: ' + e.message });
+      setPostLog([{ success: false, error: e.message }]);
     } finally {
       setIsPosting(false);
     }
   };
 
-  const statCards = [
-    { label: 'TOTAL', value: stats.total || 0, color: '#fff' },
-    { label: 'PENDING', value: stats.pending || 0, color: '#f5c518' },
-    { label: 'POSTED', value: stats.posted || 0, color: '#00c851' },
-    { label: 'SCHEDULED', value: stats.scheduled || 0, color: '#5bc0de' },
-    { label: 'FAILED', value: stats.failed || 0, color: '#ff4444' },
-  ];
+  const pct = stats.dailyLimit > 0 ? Math.round((stats.postedToday / stats.dailyLimit) * 100) : 0;
 
   return (
-    <div style={{ padding: '2rem', maxWidth: '900px', margin: '0 auto' }}>
-      <h2 style={{ fontSize: '1.5rem', fontWeight: 700, letterSpacing: '0.15em', marginBottom: '2rem', color: '#fff' }}>
-        DASHBOARD
-      </h2>
+    <div style={{ padding: '2.5rem 2rem', maxWidth: '860px', margin: '0 auto' }}>
 
-      {/* Stats Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '1rem', marginBottom: '2.5rem' }}>
-        {statCards.map(card => (
-          <div key={card.label} style={{
-            background: '#111',
-            border: '1px solid #222',
-            borderRadius: '8px',
-            padding: '1.25rem 1rem',
-            textAlign: 'center',
-          }}>
-            <div style={{ fontSize: '2rem', fontWeight: 800, color: card.color, lineHeight: 1 }}>
-              {loading ? '—' : card.value}
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '2rem' }}>
+        <h2 style={{ fontSize: '1.1rem', fontWeight: 700, letterSpacing: '0.2em', color: '#fff', margin: 0 }}>DASHBOARD</h2>
+        <span style={{ fontSize: '0.65rem', color: '#444', letterSpacing: '0.05em' }}>
+          {lastRefresh ? 'updated ' + lastRefresh.toLocaleTimeString() : 'loading...'}
+        </span>
+      </div>
+
+      {/* Stats row */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.75rem', marginBottom: '1.5rem' }}>
+        {[
+          { label: 'TOTAL', val: stats.total, color: '#fff' },
+          { label: 'PENDING', val: stats.pending, color: '#f5c518' },
+          { label: 'POSTED', val: stats.posted, color: '#00c851' },
+          { label: 'SCHEDULED', val: stats.scheduled, color: '#5bc0de' },
+          { label: 'FAILED', val: stats.failed, color: '#ff4444' },
+        ].map(s => (
+          <div key={s.label} style={{ background: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: '6px', padding: '1rem 0.75rem', textAlign: 'center' }}>
+            <div style={{ fontSize: '1.8rem', fontWeight: 800, color: s.color, lineHeight: 1 }}>
+              {loading ? '—' : s.val}
             </div>
-            <div style={{ fontSize: '0.65rem', letterSpacing: '0.15em', color: '#666', marginTop: '0.5rem' }}>
-              {card.label}
-            </div>
+            <div style={{ fontSize: '0.6rem', letterSpacing: '0.12em', color: '#555', marginTop: '0.4rem' }}>{s.label}</div>
           </div>
         ))}
       </div>
 
-      {/* Force Post Section */}
-      <div style={{
-        background: '#111',
-        border: '1px solid #222',
-        borderRadius: '8px',
-        padding: '1.5rem 2rem',
-        marginBottom: '1.5rem',
-      }}>
-        <div style={{ marginBottom: '1rem' }}>
-          <div style={{ fontSize: '0.75rem', letterSpacing: '0.15em', color: '#888', marginBottom: '0.35rem' }}>
-            MANUAL POST TRIGGER
-          </div>
-          <div style={{ fontSize: '0.85rem', color: '#555' }}>
-            Force-post pending reels right now — bypasses the 10-minute scheduler
-          </div>
+      {/* Daily progress */}
+      <div style={{ background: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: '6px', padding: '1rem 1.25rem', marginBottom: '1.5rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+          <span style={{ fontSize: '0.65rem', letterSpacing: '0.12em', color: '#555' }}>TODAY'S POSTS</span>
+          <span style={{ fontSize: '0.75rem', fontWeight: 700, color: pct >= 100 ? '#ff4444' : '#fff' }}>
+            {stats.postedToday} / {stats.dailyLimit}
+          </span>
         </div>
+        <div style={{ background: '#1a1a1a', borderRadius: '3px', height: '4px', overflow: 'hidden' }}>
+          <div style={{ height: '100%', width: pct + '%', background: pct >= 100 ? '#ff4444' : '#fff', borderRadius: '3px', transition: 'width 0.5s' }} />
+        </div>
+      </div>
+
+      {/* Post Now */}
+      <div style={{ background: '#0d0d0d', border: '1px solid #1a1a1a', borderRadius: '6px', padding: '1.5rem 1.25rem', marginBottom: '1rem' }}>
+        <div style={{ fontSize: '0.65rem', letterSpacing: '0.15em', color: '#555', marginBottom: '1rem' }}>MANUAL POST TRIGGER</div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
-          {/* Count selector */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
-            <label style={{ fontSize: '0.65rem', letterSpacing: '0.1em', color: '#666' }}>
-              HOW MANY TO POST
-            </label>
-            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
-              {[1, 3, 5, 10, 15, 20, 25, 50].map(n => (
-                <button
-                  key={n}
-                  onClick={() => setPostCount(n)}
-                  style={{
-                    padding: '0.4rem 0.75rem',
-                    fontSize: '0.8rem',
-                    fontWeight: 600,
-                    border: postCount === n ? '1px solid #fff' : '1px solid #333',
-                    borderRadius: '4px',
-                    background: postCount === n ? '#fff' : '#0a0a0a',
-                    color: postCount === n ? '#000' : '#555',
-                    cursor: 'pointer',
-                    transition: 'all 0.15s',
-                  }}
-                >
-                  {n}
-                </button>
-              ))}
-            </div>
+          {/* Count pills */}
+          <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+            {[1, 3, 5, 10, 15, 20, 25, 50].map(n => (
+              <button key={n} onClick={() => setPostCount(n)} style={{
+                padding: '0.35rem 0.65rem',
+                fontSize: '0.75rem', fontWeight: 600,
+                border: postCount === n ? '1px solid #fff' : '1px solid #2a2a2a',
+                borderRadius: '4px',
+                background: postCount === n ? '#fff' : 'transparent',
+                color: postCount === n ? '#000' : '#555',
+                cursor: 'pointer', transition: 'all 0.12s',
+              }}>{n}</button>
+            ))}
           </div>
 
-          {/* Post Now button */}
-          <button
-            onClick={handleForcePost}
-            disabled={isPosting || stats.pending === 0}
+          {/* Post button */}
+          <button onClick={handlePost} disabled={isPosting || stats.pending === 0}
             style={{
-              padding: '0.75rem 2rem',
-              fontSize: '0.85rem',
-              fontWeight: 700,
-              letterSpacing: '0.1em',
-              border: '1px solid #fff',
-              borderRadius: '6px',
-              background: isPosting ? '#111' : '#fff',
+              padding: '0.6rem 1.75rem', fontSize: '0.8rem', fontWeight: 700, letterSpacing: '0.1em',
+              border: '1px solid ' + (isPosting ? '#333' : '#fff'),
+              borderRadius: '5px',
+              background: isPosting ? 'transparent' : '#fff',
               color: isPosting ? '#555' : '#000',
               cursor: (isPosting || stats.pending === 0) ? 'not-allowed' : 'pointer',
-              opacity: (isPosting || stats.pending === 0) ? 0.5 : 1,
-              transition: 'all 0.2s',
-              whiteSpace: 'nowrap',
-              alignSelf: 'flex-end',
-            }}
-          >
-            {isPosting ? 'POSTING…' : `POST ${postCount} NOW`}
+              opacity: stats.pending === 0 ? 0.4 : 1,
+              transition: 'all 0.15s', whiteSpace: 'nowrap',
+            }}>
+            {isPosting ? (
+              <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <span style={{ display: 'inline-block', width: '10px', height: '10px', border: '2px solid #555', borderTopColor: '#aaa', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+                POSTING...
+              </span>
+            ) : `POST ${postCount} NOW`}
           </button>
         </div>
 
-        {/* Result message */}
-        {postResult && (
-          <div style={{
-            marginTop: '1rem',
-            padding: '0.75rem 1rem',
-            borderRadius: '4px',
-            background: postResult.results && postResult.results.some(r => r.success) ? 'rgba(0,200,81,0.1)' : 'rgba(255,68,68,0.1)',
-            border: '1px solid ' + (postResult.results && postResult.results.some(r => r.success) ? '#00c85133' : '#ff444433'),
-            fontSize: '0.8rem',
-            color: '#aaa',
-          }}>
-            {postResult.message}
-            {postResult.results && (
-              <div style={{ marginTop: '0.4rem' }}>
-                {postResult.results.map((r, i) => (
-                  <div key={i} style={{ color: r.success ? '#00c851' : '#ff4444', fontSize: '0.75rem' }}>
-                    {r.success ? `✓ Post #${r.postId} → IG: ${r.igId}` : `✗ Post #${r.postId || '?'}: ${r.error}`}
-                  </div>
-                ))}
+        {/* Result log */}
+        {postLog.length > 0 && (
+          <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+            {postLog.map((r, i) => (
+              <div key={i} style={{
+                fontSize: '0.72rem', padding: '0.4rem 0.6rem', borderRadius: '4px',
+                background: r.success === true ? 'rgba(0,200,81,0.08)' : r.success === null ? 'rgba(91,192,222,0.08)' : 'rgba(255,68,68,0.08)',
+                color: r.success === true ? '#00c851' : r.success === null ? '#5bc0de' : '#ff4444',
+                border: '1px solid ' + (r.success === true ? '#00c85122' : r.success === null ? '#5bc0de22' : '#ff444422'),
+              }}>
+                {r.success === true && `✓ Posted → IG: ${r.igId}`}
+                {r.success === null && `⏳ ${r.note || 'Processing — will publish shortly'}`}
+                {r.success === false && `✗ ${r.error || 'Failed'}`}
               </div>
-            )}
+            ))}
           </div>
         )}
       </div>
 
-      {/* Note about no valid token */}
-      {stats.pending > 0 && (
-        <div style={{ fontSize: '0.75rem', color: '#444', textAlign: 'center' }}>
-          {stats.pending} post{stats.pending !== 1 ? 's' : ''} waiting in queue — auto-scheduler runs every 10 min
+      {/* Status note */}
+      {stats.pending > 0 && !isPosting && (
+        <div style={{ fontSize: '0.7rem', color: '#333', textAlign: 'center', letterSpacing: '0.05em' }}>
+          {stats.pending} reel{stats.pending !== 1 ? 's' : ''} in queue · auto-scheduler fires every 10 min
         </div>
       )}
+
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+      `}</style>
     </div>
   );
 }
