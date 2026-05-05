@@ -30,14 +30,20 @@ exports.handler = async (event) => {
       return { statusCode: 200, body: JSON.stringify({ message: 'Daily limit reached' }) };
     }
 
-    // Lock next pending post atomically (also pick up stuck scheduled posts older than 10 min)
+    // Pick the next post that is due:
+    // 1. status='scheduled' AND scheduled_at <= NOW() (time has come)
+    // 2. OR status='scheduled' AND container_id IS NOT NULL (container already created, just needs publish)
+    // Ordered by scheduled_at ASC to post in order
     const lockResult = await query(`
-      UPDATE posts SET status = 'scheduled', error_message = NULL
+      UPDATE posts
+      SET status = 'scheduled', error_message = NULL
       WHERE id = (
         SELECT id FROM posts
-        WHERE status = 'pending'
-           OR (status = 'scheduled' AND created_at < NOW() - INTERVAL '10 minutes')
-        ORDER BY created_at ASC
+        WHERE (
+          (status = 'scheduled' AND scheduled_at IS NOT NULL AND scheduled_at <= NOW())
+          OR (status = 'scheduled' AND container_id IS NOT NULL)
+        )
+        ORDER BY scheduled_at ASC NULLS LAST, created_at ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED
       )
@@ -45,16 +51,47 @@ exports.handler = async (event) => {
     `);
 
     if (lockResult.rowCount === 0) {
-      console.log('[auto-post] No pending posts');
-      return { statusCode: 200, body: JSON.stringify({ message: 'No pending posts' }) };
+      console.log('[auto-post] No posts due yet');
+      return { statusCode: 200, body: JSON.stringify({ message: 'No posts due' }) };
     }
 
     post = lockResult.rows[0];
-    console.log(`[auto-post] Processing post ${post.id}, type: ${post.media_type || 'VIDEO'}`);
+    console.log(`[auto-post] Processing post ${post.id}, scheduled_at: ${post.scheduled_at}`);
 
+    // If container already exists, skip straight to publish
+    if (post.container_id) {
+      console.log(`[auto-post] Resuming container ${post.container_id}`);
+      const statusRes = await igRequest(`/${post.container_id}?fields=status_code&access_token=${token}`);
+
+      if (statusRes.status_code === 'FINISHED') {
+        const publishRes = await igRequest(
+          `/${userId}/media_publish?creation_id=${post.container_id}&access_token=${token}`,
+          'POST'
+        );
+        await query(
+          `UPDATE posts SET status = 'posted', posted_at = NOW(), ig_post_id = $2, container_id = NULL WHERE id = $1`,
+          [post.id, publishRes.id || null]
+        );
+        console.log(`[auto-post] Published existing container for post ${post.id} -> IG ${publishRes.id}`);
+        return { statusCode: 200, body: JSON.stringify({ message: 'Posted', postId: post.id, igId: publishRes.id }) };
+      } else if (statusRes.status_code === 'ERROR') {
+        await query(
+          `UPDATE posts SET status = 'failed', error_message = 'Container processing failed', container_id = NULL WHERE id = $1`,
+          [post.id]
+        );
+        return { statusCode: 200, body: JSON.stringify({ message: 'Container failed' }) };
+      } else {
+        // Still processing — put back to scheduled to try again next cycle
+        await query(
+          `UPDATE posts SET status = 'scheduled' WHERE id = $1`,
+          [post.id]
+        );
+        return { statusCode: 200, body: JSON.stringify({ message: 'Container still processing' }) };
+      }
+    }
+
+    // Fresh post — generate caption if needed
     let caption = post.caption;
-
-    // Generate caption from first frame if blank
     if (!caption || caption.trim() === '') {
       if (post.thumbnail_url) {
         console.log('[auto-post] Analyzing first frame for caption...');
@@ -82,24 +119,30 @@ exports.handler = async (event) => {
     const containerId = containerRes.id;
     if (!containerId) throw new Error('No container ID returned');
 
-    // Step 2: For videos, poll status (max 20s to fit within 26s limit)
+    // Step 2: Poll up to 18s for container to be ready
     if (isVideo) {
-      console.log('[auto-post] Waiting for container to process...');
       let ready = false;
       for (let i = 0; i < 6; i++) {
         await sleep(3000);
         try {
           const s = await igRequest(`/${containerId}?fields=status_code&access_token=${token}`);
           console.log(`[auto-post] Container status: ${s.status_code}`);
-          if (s.status_code === 'FINISHED' || s.status_code === 'PUBLISHED') { ready = true; break; }
+          if (s.status_code === 'FINISHED') { ready = true; break; }
           if (s.status_code === 'ERROR') throw new Error('Instagram media processing failed');
         } catch (e) {
           if (e.message.includes('processing failed')) throw e;
-          // Ignore transient errors and retry
         }
       }
-      // Attempt publish even if not FINISHED (Instagram usually accepts it)
-      console.log(`[auto-post] Container ready: ${ready}. Attempting publish...`);
+
+      if (!ready) {
+        // Save container_id so next cycle can finish it
+        await query(
+          `UPDATE posts SET container_id = $2, caption = $3 WHERE id = $1`,
+          [post.id, containerId, caption]
+        );
+        console.log(`[auto-post] Container not ready yet, saved for next cycle: ${containerId}`);
+        return { statusCode: 200, body: JSON.stringify({ message: 'Container processing, will publish next cycle' }) };
+      }
     }
 
     // Step 3: Publish
@@ -110,7 +153,7 @@ exports.handler = async (event) => {
 
     // Step 4: Update DB
     await query(
-      `UPDATE posts SET status = 'posted', posted_at = NOW(), caption = $2, ig_post_id = $3 WHERE id = $1`,
+      `UPDATE posts SET status = 'posted', posted_at = NOW(), caption = $2, ig_post_id = $3, container_id = NULL WHERE id = $1`,
       [post.id, caption, publishRes.id || null]
     );
 
@@ -119,50 +162,35 @@ exports.handler = async (event) => {
 
   } catch (err) {
     console.error('[auto-post] Error:', err.message);
-
     if (post && post.id) {
       try {
         const retryResult = await query(`SELECT retry_count FROM posts WHERE id = $1`, [post.id]);
         const currentRetries = retryResult.rows[0]?.retry_count || 0;
-        const newStatus = currentRetries >= 3 ? 'failed' : 'pending';
+        const newStatus = currentRetries >= 3 ? 'failed' : 'scheduled';
         await query(
           `UPDATE posts SET retry_count = retry_count + 1, error_message = $2, status = $3 WHERE id = $1`,
           [post.id, err.message.substring(0, 500), newStatus]
         );
-        console.log(`[auto-post] Post ${post.id} set to ${newStatus} (retry ${currentRetries + 1})`);
       } catch (dbErr) {
         console.error('[auto-post] DB update failed:', dbErr.message);
       }
     }
-
     return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
   }
 };
 
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function analyzeFrame(imageUrl) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return generateFallbackCaption();
-
   try {
     const payload = JSON.stringify({
       model: 'gpt-4o-mini',
       messages: [
         {
           role: 'system',
-          content: `You write Instagram Reels captions for @ascend.deals - a male self-improvement and deals account focused on looksmaxxing, skincare, grooming, and lifestyle products.
-
-RULES:
-- First line: short punchy hook under 10 words. Examples: "this is why you look the same", "stop skipping this", "the product nobody talks about", "POV: you finally found what works"
-- 1-2 lines of value/intrigue after
-- End with "link in bio"
-- Then 6-8 hashtags: mix #fyp #viral with niche tags
-- NO emojis. NO exclamation marks. Lowercase only
-- Sound like a real person, not a brand
-- Always include #ascenddeals`,
+          content: `You write Instagram Reels captions for @ascend.deals - a male self-improvement and deals account focused on looksmaxxing, skincare, grooming, and lifestyle products. RULES: - First line: short punchy hook under 10 words. Examples: "this is why you look the same", "stop skipping this", "the product nobody talks about", "POV: you finally found what works" - 1-2 lines of value/intrigue after - End with "link in bio" - Then 6-8 hashtags: mix #fyp #viral with niche tags - NO emojis. NO exclamation marks. Lowercase only - Sound like a real person, not a brand - Always include #ascenddeals`,
         },
         {
           role: 'user',
@@ -175,7 +203,6 @@ RULES:
       max_tokens: 200,
       temperature: 0.85,
     });
-
     const result = await callOpenAI(apiKey, payload);
     return result.choices?.[0]?.message?.content?.trim() || generateFallbackCaption();
   } catch (err) {
@@ -225,11 +252,8 @@ function callOpenAI(apiKey, payload) {
       },
     }, (res) => {
       let data = '';
-      res.on('data', (c) => { data += c; });
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch { reject(new Error('Bad OpenAI response')); }
-      });
+      res.on('data', c => { data += c; });
+      res.on('end', () => { try { resolve(JSON.parse(data)); } catch { reject(new Error('Bad OpenAI response')); } });
     });
     req.on('error', reject);
     req.setTimeout(20000, () => { req.destroy(); reject(new Error('OpenAI timeout')); });
@@ -247,7 +271,7 @@ function igRequest(path, method = 'GET') {
       headers: { 'Content-Type': 'application/json' },
     }, (res) => {
       let data = '';
-      res.on('data', (c) => { data += c; });
+      res.on('data', c => { data += c; });
       res.on('end', () => {
         try {
           const p = JSON.parse(data);
