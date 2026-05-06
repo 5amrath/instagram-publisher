@@ -1,17 +1,17 @@
 import { useState, useCallback, useEffect } from 'react';
 import './App.css';
 import PostComposer from './components/PostComposer';
-import Dashboard from './components/Dashboard';
-import PostHistory from './components/PostHistory';
-import Settings from './components/Settings';
+import Dashboard    from './components/Dashboard';
+import PostHistory  from './components/PostHistory';
+import Settings     from './components/Settings';
 
 export default function App() {
-  const [tab, setTab] = useState('upload');
+  const [tab, setTab] = useState('dashboard');
   const [toasts, setToasts] = useState([]);
 
-  // Bulk state lifted here so it persists across tab switches
-  const [bulkFiles, setBulkFiles] = useState([]);
-  const [bulkCaption, setBulkCaption] = useState('');
+  // Bulk state persists across tab switches
+  const [bulkFiles,    setBulkFiles]    = useState([]);
+  const [bulkCaption,  setBulkCaption]  = useState('');
   const [bulkProgress, setBulkProgress] = useState({ total: 0, done: 0, failed: 0, running: false });
 
   const showToast = useCallback((msg, type = 'info') => {
@@ -22,7 +22,7 @@ export default function App() {
 
   const tabs = [
     { id: 'dashboard', label: 'Dashboard' },
-    { id: 'upload',    label: 'Upload', badge: bulkFiles.length || null },
+    { id: 'upload',    label: 'Upload',  badge: bulkFiles.length || null },
     { id: 'history',   label: 'History' },
     { id: 'settings',  label: 'Settings' },
   ];
@@ -50,23 +50,20 @@ export default function App() {
         {tab === 'upload' && (
           <PostComposer
             showToast={showToast}
-            bulkFiles={bulkFiles}
-            setBulkFiles={setBulkFiles}
-            bulkCaption={bulkCaption}
-            setBulkCaption={setBulkCaption}
-            bulkProgress={bulkProgress}
-            setBulkProgress={setBulkProgress}
+            bulkFiles={bulkFiles}       setBulkFiles={setBulkFiles}
+            bulkCaption={bulkCaption}   setBulkCaption={setBulkCaption}
+            bulkProgress={bulkProgress} setBulkProgress={setBulkProgress}
           />
         )}
         {tab === 'history'  && <PostHistory showToast={showToast} />}
-        {tab === 'settings' && <Settings showToast={showToast} />}
+        {tab === 'settings' && <Settings    showToast={showToast} />}
       </main>
 
       <div className="toast-wrap">
         {toasts.map(t => (
           <div key={t.id} className={`toast ${t.type}`}>
-            {t.type === 'success' && '✓ '}
-            {t.type === 'error'   && '✕ '}
+            {t.type === 'success' && <span style={{ color: 'var(--emerald-lt)' }}>✓</span>}
+            {t.type === 'error'   && <span style={{ color: 'var(--red-lt)'    }}>✕</span>}
             {t.msg}
           </div>
         ))}
