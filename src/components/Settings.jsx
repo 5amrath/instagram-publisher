@@ -1,153 +1,209 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 
-const LIMITS = [10, 15, 20, 25, 30, 40, 50];
+const DAILY_OPTIONS = [5,10,15,20,25,30,40,50];
 
 export default function Settings({ showToast }) {
-  const [limit,        setLimit]        = useState(25);
-  const [saving,       setSaving]       = useState(false);
-  const [loading,      setLoading]      = useState(true);
-  const [shortToken,   setShortToken]   = useState('');
-  const [refreshing,   setRefreshing]   = useState(false);
-  const [newToken,     setNewToken]     = useState('');
+  const [dailyLimit, setDailyLimit]       = useState(25);
+  const [savedLimit, setSavedLimit]       = useState(25);
+  const [saving, setSaving]               = useState(false);
+  const [accountInfo, setAccountInfo]     = useState(null);
+  const [loadingAccount, setLoadingAccount] = useState(true);
+  const [refreshing, setRefreshing]       = useState(false);
+  const [stats, setStats]                 = useState(null);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await axios.get('/.netlify/functions/get-queue-stats');
-        setLimit(res.data.dailyLimit || 25);
-      } catch {}
-      finally { setLoading(false); }
-    })();
+    // Load account info
+    axios.get('/.netlify/functions/account-info')
+      .then(r => setAccountInfo(r.data))
+      .catch(() => {})
+      .finally(() => setLoadingAccount(false));
+    // Load current daily limit
+    axios.get('/.netlify/functions/get-queue-stats')
+      .then(r => { setDailyLimit(r.data.dailyLimit || 25); setSavedLimit(r.data.dailyLimit || 25); setStats(r.data); })
+      .catch(() => {});
   }, []);
 
-  const saveLimit = async (val) => {
+  const saveDailyLimit = async (val) => {
     setSaving(true);
     try {
       await axios.post('/.netlify/functions/update-settings', { key: 'daily_limit', value: String(val) });
-      setLimit(val);
-      showToast(`Limit set to ${val}/day`, 'success');
-    } catch {
-      showToast('Failed to save', 'error');
-    } finally {
-      setSaving(false);
-    }
+      setSavedLimit(val);
+      showToast('Daily limit saved', 'success');
+    } catch { showToast('Failed to save', 'error'); }
+    finally { setSaving(false); }
   };
 
   const handleRefreshToken = async () => {
-    if (!shortToken.trim()) return showToast('Paste your short-lived token first', 'error');
     setRefreshing(true);
-    setNewToken('');
     try {
-      const res = await axios.post('/.netlify/functions/refresh-token', { shortToken: shortToken.trim() });
-      if (res.data.pageToken) {
-        setNewToken(res.data.pageToken);
-        showToast('Got 60-day token! Copy it and update in Netlify env vars.', 'success');
-      }
-    } catch (err) {
-      const msg = err.response?.data?.error || err.message;
-      if (msg.includes('FACEBOOK_APP_SECRET')) {
-        showToast('Add FACEBOOK_APP_ID and FACEBOOK_APP_SECRET to Netlify env vars first', 'error');
-      } else {
-        showToast('Error: ' + msg, 'error');
-      }
-    } finally {
-      setRefreshing(false);
-    }
+      const res = await axios.post('/.netlify/functions/refresh-token', {});
+      showToast(res.data.message || 'Token refreshed', 'success');
+    } catch (e) { showToast(e.response?.data?.error || 'Refresh failed', 'error'); }
+    finally { setRefreshing(false); }
   };
 
-  if (loading) return <div className="center-msg"><span className="spinner" /> Loading...</div>;
+  const tokenAge = accountInfo?.tokenAge;
+  const tokenDaysLeft = tokenAge ? Math.max(0, 60 - Math.floor(tokenAge / 86400)) : null;
 
   return (
-    <div className="settings fade-in">
-      <h2 className="page-title">Settings</h2>
-
-      {/* Daily limit */}
-      <div className="card">
-        <div className="card-header">
-          <h3 className="card-title">Daily Reels Limit</h3>
-        </div>
-        <p className="text-dim mb-12">Max Reels the auto-poster publishes per day. Instagram allows 50/day.</p>
-        <div className="limit-row">
-          {LIMITS.map(n => (
-            <button
-              key={n}
-              className={`limit-btn${limit === n ? ' active' : ''}`}
-              onClick={() => saveLimit(n)}
-              disabled={saving}
-            >
-              {n}
-            </button>
-          ))}
-        </div>
-        <p className="text-dim mt-8">Current: <strong style={{color:'var(--t1)'}}>{limit}/day</strong></p>
+    <div className="fade-in">
+      <div className="page-header">
+        <span className="page-title">Settings</span>
       </div>
 
-      <div className="settings-grid">
-        {/* Worker info */}
+      <div className="settings-sections">
+
+        {/* Account */}
         <div className="card">
-          <div className="card-header"><h3 className="card-title">Auto-Post Worker</h3></div>
-          <div className="info-grid">
-            <div className="info-row"><span className="info-key">Frequency</span><span className="info-val">Every 10 min</span></div>
-            <div className="info-row"><span className="info-key">Posts per run</span><span className="info-val">1</span></div>
-            <div className="info-row"><span className="info-key">Max retries</span><span className="info-val">3</span></div>
-            <div className="info-row"><span className="info-key">AI captions</span><span className="info-val">GPT-4o-mini vision</span></div>
-            <div className="info-row"><span className="info-key">Video host</span><span className="info-val">Cloudinary</span></div>
-            <div className="info-row"><span className="info-key">Queue order</span><span className="info-val">FIFO (oldest first)</span></div>
+          <span className="section-label">Instagram Account</span>
+          {loadingAccount ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '0.5rem 0', color: 'var(--ash)', fontSize: '0.78rem' }}>
+              <span className="spinner" /> Loading account info…
+            </div>
+          ) : accountInfo ? (
+            <>
+              <div className="settings-row">
+                <div>
+                  <div className="settings-row-label">@{accountInfo.username || 'ascend.deals'}</div>
+                  <div className="settings-row-desc">Connected Instagram Business Account</div>
+                </div>
+                <div className="settings-row-right">
+                  {accountInfo.profile_picture_url && (
+                    <img src={accountInfo.profile_picture_url} alt="" style={{ width: 40, height: 40, borderRadius: '50%', border: '1px solid rgba(245,240,232,0.1)' }} />
+                  )}
+                </div>
+              </div>
+              <div className="settings-row">
+                <div>
+                  <div className="settings-row-label">Followers</div>
+                  <div className="settings-row-desc">Total follower count on connected account</div>
+                </div>
+                <div className="settings-row-right">
+                  <span style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--cream)', fontVariantNumeric: 'tabular-nums' }}>
+                    {accountInfo.followers_count?.toLocaleString() || '—'}
+                  </span>
+                </div>
+              </div>
+              {stats && (
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row-label">Total Published Reels</div>
+                    <div className="settings-row-desc">Reels posted via Ascend Publisher</div>
+                  </div>
+                  <div className="settings-row-right">
+                    <span style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--emerald-lt)', fontVariantNumeric: 'tabular-nums' }}>
+                      {stats.posted?.toLocaleString() || '0'}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <p style={{ fontSize: '0.78rem', color: 'var(--ash)', padding: '0.5rem 0' }}>Could not load account info. Check your access token.</p>
+          )}
+        </div>
+
+        {/* Token */}
+        <div className="card">
+          <span className="section-label">Access Token</span>
+          <div className="settings-row">
+            <div>
+              <div className="settings-row-label">Token Status</div>
+              <div className="settings-row-desc">
+                {tokenDaysLeft !== null
+                  ? tokenDaysLeft > 10
+                    ? `Valid · expires in ~${tokenDaysLeft} days`
+                    : tokenDaysLeft > 0
+                      ? `Expiring soon — ${tokenDaysLeft} days left`
+                      : 'Token may be expired'
+                  : '60-day long-lived token'}
+              </div>
+            </div>
+            <div className="settings-row-right">
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: '0.35rem',
+                fontSize: '0.62rem', fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase',
+                padding: '0.22rem 0.65rem', borderRadius: '99px',
+                background: tokenDaysLeft === null ? 'rgba(45,122,91,0.15)' : tokenDaysLeft > 10 ? 'rgba(45,122,91,0.15)' : 'rgba(201,168,76,0.15)',
+                color: tokenDaysLeft === null ? 'var(--emerald-lt)' : tokenDaysLeft > 10 ? 'var(--emerald-lt)' : 'var(--gold-light)',
+              }}>
+                <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'currentColor', display: 'inline-block' }} />
+                {tokenDaysLeft === null ? 'Active' : tokenDaysLeft > 10 ? `${tokenDaysLeft}d left` : tokenDaysLeft > 0 ? 'Expiring' : 'Check token'}
+              </span>
+            </div>
+          </div>
+          <div className="settings-row" style={{ borderBottom: 'none', paddingBottom: 0 }}>
+            <div>
+              <div className="settings-row-label">Refresh Token</div>
+              <div className="settings-row-desc">Exchange for a new 60-day token using saved App credentials</div>
+            </div>
+            <div className="settings-row-right">
+              <button className="btn-secondary" style={{ fontSize: '0.73rem', padding: '0.45rem 1.1rem' }} onClick={handleRefreshToken} disabled={refreshing}>
+                {refreshing ? <><span className="spinner" /> Refreshing…</> : '↺ Refresh Token'}
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* IG limits */}
+        {/* Posting limits */}
         <div className="card">
-          <div className="card-header"><h3 className="card-title">Instagram Rules</h3></div>
-          <div className="info-grid">
-            <div className="info-row"><span className="info-key">API limit</span><span className="info-val">50 posts/day</span></div>
-            <div className="info-row"><span className="info-key">Caption</span><span className="info-val">2,200 chars max</span></div>
-            <div className="info-row"><span className="info-key">Hashtags</span><span className="info-val">30 max</span></div>
-            <div className="info-row"><span className="info-key">Reels format</span><span className="info-val">MP4, 3–90 sec</span></div>
-            <div className="info-row"><span className="info-key">Image format</span><span className="info-val">JPEG / PNG</span></div>
-            <div className="info-row"><span className="info-key">API version</span><span className="info-val">Graph v21.0</span></div>
+          <span className="section-label">Posting Limits</span>
+          <div className="settings-row" style={{ borderBottom: 'none', paddingBottom: 0 }}>
+            <div>
+              <div className="settings-row-label">Daily Post Limit</div>
+              <div className="settings-row-desc">Max posts per day. Instagram API allows up to 50.</div>
+            </div>
+            <div className="settings-row-right" style={{ flexDirection: 'column', alignItems: 'flex-end', gap: '0.6rem' }}>
+              <div className="pill-group" style={{ justifyContent: 'flex-end' }}>
+                {DAILY_OPTIONS.map(n => (
+                  <button key={n} className={`pill ${dailyLimit === n ? 'active' : ''}`}
+                    onClick={() => { setDailyLimit(n); saveDailyLimit(n); }}>
+                    {n}
+                  </button>
+                ))}
+              </div>
+              {saving && <span style={{ fontSize: '0.65rem', color: 'var(--ash)', display: 'flex', alignItems: 'center', gap: '0.3rem' }}><span className="spinner" /> Saving…</span>}
+              {!saving && dailyLimit === savedLimit && <span style={{ fontSize: '0.62rem', color: 'var(--emerald-lt)' }}>✓ Saved ({savedLimit}/day)</span>}
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Token refresh */}
-      <div className="card">
-        <div className="card-header"><h3 className="card-title">Refresh Instagram Token</h3></div>
-        <p className="text-dim mb-12">
-          If posts are failing with "Session expired", generate a new short-lived token from the{' '}
-          <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener noreferrer" style={{color:'var(--t2)'}}>Graph API Explorer</a>
-          {' '}and paste it below. This will exchange it for a 60-day token.
-        </p>
-        <p className="text-dim mb-12" style={{fontSize:11}}>
-          Requires: FACEBOOK_APP_ID and FACEBOOK_APP_SECRET in Netlify env vars (from developers.facebook.com → App Settings → Basic).
-        </p>
-        <textarea
-          className="caption-input"
-          placeholder="Paste short-lived user token from Graph API Explorer..."
-          value={shortToken}
-          onChange={e => setShortToken(e.target.value)}
-          rows={3}
-          style={{fontSize:12, fontFamily:'monospace'}}
-        />
-        <div className="action-row" style={{marginTop:10}}>
-          <button className="btn-primary" onClick={handleRefreshToken} disabled={refreshing || !shortToken.trim()}>
-            {refreshing ? <><span className="spinner" style={{marginRight:8}} /> Exchanging...</> : 'Get 60-Day Token'}
-          </button>
-        </div>
-        {newToken && (
-          <div style={{marginTop:14}}>
-            <p className="text-dim mb-12" style={{color:'var(--green)'}}>✓ 60-day Page token generated. Copy it and update INSTAGRAM_ACCESS_TOKEN in Netlify → Site configuration → Environment variables:</p>
-            <textarea
-              className="caption-input"
-              value={newToken}
-              readOnly
-              rows={3}
-              style={{fontSize:11, fontFamily:'monospace'}}
-              onFocus={e => e.target.select()}
-            />
+        {/* Queue stats */}
+        {stats && (
+          <div className="card">
+            <span className="section-label">Queue Overview</span>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: '1px', borderRadius: '10px', overflow: 'hidden', background: 'rgba(245,240,232,0.04)', marginTop: '0.25rem' }}>
+              {[
+                { label: 'Total', val: stats.total, color: 'var(--cream)' },
+                { label: 'Pending', val: stats.pending, color: 'var(--gold-light)' },
+                { label: 'Posted', val: stats.posted, color: 'var(--emerald-lt)' },
+                { label: 'Failed', val: stats.failed, color: 'var(--red-lt)' },
+              ].map(c => (
+                <div key={c.label} style={{ background: 'var(--charcoal-3)', padding: '1rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '1.6rem', fontWeight: 800, color: c.color, fontVariantNumeric: 'tabular-nums' }}>{c.val}</div>
+                  <div style={{ fontSize: '0.55rem', letterSpacing: '0.16em', textTransform: 'uppercase', color: 'var(--ash)', marginTop: '0.3rem', fontWeight: 600 }}>{c.label}</div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
+
+        {/* Info */}
+        <div className="card" style={{ background: 'transparent', border: '1px solid rgba(245,240,232,0.05)' }}>
+          <span className="section-label">System</span>
+          <div className="settings-row">
+            <div className="settings-row-label">Auto-Poster</div>
+            <span style={{ fontSize: '0.62rem', color: 'var(--emerald-lt)', fontWeight: 600, background: 'rgba(45,122,91,0.1)', padding: '0.2rem 0.6rem', borderRadius: 99, border: '1px solid rgba(45,122,91,0.2)' }}>
+              ● Runs every minute
+            </span>
+          </div>
+          <div className="settings-row" style={{ borderBottom: 'none', paddingBottom: 0 }}>
+            <div className="settings-row-label">Platform</div>
+            <span style={{ fontSize: '0.72rem', color: 'var(--ash)' }}>Netlify · Neon DB · Instagram Graph API v21.0</span>
+          </div>
+        </div>
+
       </div>
     </div>
   );
