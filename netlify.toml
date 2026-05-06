@@ -1,22 +1,26 @@
 [build]
-  command = "npm run build"
-  publish = "build"
-  functions = "netlify/functions"
+command = "npm run build"
+publish = "build"
+functions = "netlify/functions"
 
 [functions]
-  node_bundler = "esbuild"
+node_bundler = "esbuild"
 
 [functions."*"]
-  timeout = 26
+timeout = 26
+
+# Run auto-post every minute to fire scheduled posts on time
+[functions."auto-post"]
+schedule = "* * * * *"
 
 [[redirects]]
-  from = "/api/*"
-  to = "/.netlify/functions/:splat"
-  status = 200
+from = "/api/*"
+to = "/.netlify/functions/:splat"
+status = 200
 
 [[headers]]
-  for = "/*"
+for = "/*"
   [headers.values]
-    X-Frame-Options = "DENY"
-    X-XSS-Protection = "1; mode=block"
-    X-Content-Type-Options = "nosniff"
+  X-Frame-Options = "DENY"
+  X-XSS-Protection = "1; mode=block"
+  X-Content-Type-Options = "nosniff"
