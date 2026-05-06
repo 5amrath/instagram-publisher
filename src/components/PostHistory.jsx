@@ -17,7 +17,7 @@ export default function PostHistory({ showToast }) {
     setLoading(true);
     try {
       const res = await axios.get('/.netlify/functions/get-posts');
-      setPosts(res.data || []);
+      const data = res.data; setPosts(Array.isArray(data) ? data : (data?.posts || data?.data || []));
     } catch { showToast('Failed to load posts', 'error'); }
     finally { setLoading(false); }
   }, [showToast]);
