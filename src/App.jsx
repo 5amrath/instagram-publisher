@@ -13,14 +13,14 @@ const NAV_SECTIONS = [
   { label: 'PUBLISH', items: [
     { id: 'dashboard', label: 'Dashboard', icon: '⚡' },
     { id: 'upload', label: 'Upload', icon: '↑' },
-    { id: 'history', label: 'History', icon: '🕒' },
+    { id: 'history', label: 'History', icon: '⧖' },
   ]},
   { label: 'RESEARCH', items: [
     { id: 'products', label: 'Products', icon: '📦' },
-    { id: 'creators', label: 'Creators', icon: '👤' },
+    { id: 'creators', label: 'Creators', icon: '👥' },
   ]},
   { label: 'AI', items: [
-    { id: 'ai', label: 'AI Tools', icon: '🤖' },
+    { id: 'ai', label: 'AI Tools', icon: '✨' },
   ]},
   { label: 'ORGANIZE', items: [
     { id: 'planner', label: 'Planner', icon: '📅' },
@@ -47,7 +47,7 @@ export default function App() {
   const currentLabel = NAV_SECTIONS.flatMap(s => s.items).find(i => i.id === tab)?.label || '';
 
   return (
-    <div className={`app-shell ${sidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}>
+    <div className={'app-shell ' + (sidebarOpen ? 'sidebar-open' : 'sidebar-closed')}>
       <aside className="sidebar">
         <div className="sidebar-brand">
           <span className="brand-logo">A</span>
@@ -60,7 +60,7 @@ export default function App() {
               {section.items.map(item => (
                 <button
                   key={item.id}
-                  className={`sidebar-link ${tab === item.id ? 'active' : ''}`}
+                  className={'sidebar-link ' + (tab === item.id ? 'active' : '')}
                   onClick={() => setTab(item.id)}
                   title={!sidebarOpen ? item.label : ''}
                 >
@@ -93,9 +93,12 @@ export default function App() {
           {tab === 'upload' && (
             <PostComposer
               showToast={showToast}
-              bulkFiles={bulkFiles} setBulkFiles={setBulkFiles}
-              bulkCaption={bulkCaption} setBulkCaption={setBulkCaption}
-              bulkProgress={bulkProgress} setBulkProgress={setBulkProgress}
+              bulkFiles={bulkFiles}
+              setBulkFiles={setBulkFiles}
+              bulkCaption={bulkCaption}
+              setBulkCaption={setBulkCaption}
+              bulkProgress={bulkProgress}
+              setBulkProgress={setBulkProgress}
             />
           )}
           {tab === 'history' && <PostHistory showToast={showToast} />}
@@ -109,7 +112,7 @@ export default function App() {
 
       <div className="toast-wrap">
         {toasts.map(t => (
-          <div key={t.id} className={`toast ${t.type}`}>
+          <div key={t.id} className={'toast ' + t.type}>
             {t.type === 'success' && <span style={{ color: 'var(--emerald-lt)' }}>✓</span>}
             {t.type === 'error' && <span style={{ color: 'var(--red-lt)' }}>✕</span>}
             {t.msg}
