@@ -1,68 +1,69 @@
 const { query } = require('./utils/db');
 const https = require('https');
-
 const IG_BASE = 'graph.facebook.com';
 const IG_VERSION = 'v21.0';
 
 exports.handler = async (event) => {
   console.log('[auto-post] Worker triggered at', new Date().toISOString());
-
   const token = process.env.INSTAGRAM_ACCESS_TOKEN;
   const userId = process.env.INSTAGRAM_USER_ID;
-
   if (!token || !userId) {
     console.error('[auto-post] Missing Instagram credentials');
     return { statusCode: 500, body: 'Missing Instagram credentials' };
   }
 
   let post = null;
-
   try {
     // Check daily limit
     const settingsResult = await query(`SELECT value FROM settings WHERE key = 'daily_limit'`);
-    const dailyLimit = settingsResult.rows[0] ? parseInt(settingsResult.rows[0].value, 10) : 25;
-
+    const dailyLimit = settingsResult.rows[0] ? Math.min(parseInt(settingsResult.rows[0].value, 10), 100) : 50;
     const todayResult = await query(`SELECT COUNT(*) AS count FROM posts WHERE posted_at >= CURRENT_DATE`);
     const postedToday = parseInt(todayResult.rows[0].count, 10);
-
     if (postedToday >= dailyLimit) {
       console.log(`[auto-post] Daily limit reached (${postedToday}/${dailyLimit})`);
       return { statusCode: 200, body: JSON.stringify({ message: 'Daily limit reached' }) };
     }
 
-    // Pick the next post that is due:
-    // 1. status='scheduled' AND scheduled_at <= NOW() (time has come)
-    // 2. OR status='scheduled' AND container_id IS NOT NULL (container already created, just needs publish)
-    // Ordered by scheduled_at ASC to post in order
+    // Lock the next scheduled post that is due
     const lockResult = await query(`
-      UPDATE posts
-      SET status = 'scheduled', error_message = NULL
+      UPDATE posts SET status = 'scheduled', error_message = NULL
       WHERE id = (
-        SELECT id FROM posts
-        WHERE (
+        SELECT id FROM posts WHERE (
           (status = 'scheduled' AND scheduled_at IS NOT NULL AND scheduled_at <= NOW())
           OR (status = 'scheduled' AND container_id IS NOT NULL)
         )
         ORDER BY scheduled_at ASC NULLS LAST, created_at ASC
-        LIMIT 1
-        FOR UPDATE SKIP LOCKED
+        LIMIT 1 FOR UPDATE SKIP LOCKED
       )
       RETURNING *
     `);
-
     if (lockResult.rowCount === 0) {
       console.log('[auto-post] No posts due yet');
       return { statusCode: 200, body: JSON.stringify({ message: 'No posts due' }) };
     }
-
     post = lockResult.rows[0];
     console.log(`[auto-post] Processing post ${post.id}, scheduled_at: ${post.scheduled_at}`);
+
+    // DEDUP CHECK: skip if this video URL was already posted
+    if (post.video_url) {
+      const dupCheck = await query(
+        `SELECT id FROM posts WHERE video_url = $1 AND status = 'posted' AND id != $2 LIMIT 1`,
+        [post.video_url, post.id]
+      );
+      if (dupCheck.rows.length > 0) {
+        console.log(`[auto-post] Duplicate video detected for post ${post.id}, marking as failed`);
+        await query(
+          `UPDATE posts SET status = 'failed', error_message = 'Duplicate video URL - already posted' WHERE id = $1`,
+          [post.id]
+        );
+        return { statusCode: 200, body: JSON.stringify({ message: 'Duplicate video skipped', postId: post.id }) };
+      }
+    }
 
     // If container already exists, skip straight to publish
     if (post.container_id) {
       console.log(`[auto-post] Resuming container ${post.container_id}`);
       const statusRes = await igRequest(`/${post.container_id}?fields=status_code&access_token=${token}`);
-
       if (statusRes.status_code === 'FINISHED') {
         const publishRes = await igRequest(
           `/${userId}/media_publish?creation_id=${post.container_id}&access_token=${token}`,
@@ -81,16 +82,12 @@ exports.handler = async (event) => {
         );
         return { statusCode: 200, body: JSON.stringify({ message: 'Container failed' }) };
       } else {
-        // Still processing — put back to scheduled to try again next cycle
-        await query(
-          `UPDATE posts SET status = 'scheduled' WHERE id = $1`,
-          [post.id]
-        );
+        await query(`UPDATE posts SET status = 'scheduled' WHERE id = $1`, [post.id]);
         return { statusCode: 200, body: JSON.stringify({ message: 'Container still processing' }) };
       }
     }
 
-    // Fresh post — generate caption if needed
+    // Fresh post - generate caption if needed
     let caption = post.caption;
     if (!caption || caption.trim() === '') {
       if (post.thumbnail_url) {
@@ -104,7 +101,6 @@ exports.handler = async (event) => {
     const isVideo = post.media_type === 'VIDEO' || post.media_type === 'REELS' || !post.media_type;
     const mediaUrl = post.video_url || post.media_url;
 
-    // Build container params
     const containerParams = new URLSearchParams({ access_token: token, caption });
     if (isVideo) {
       containerParams.set('media_type', 'REELS');
@@ -113,13 +109,11 @@ exports.handler = async (event) => {
       containerParams.set('image_url', mediaUrl);
     }
 
-    // Step 1: Create media container
     console.log('[auto-post] Creating media container...');
     const containerRes = await igRequest(`/${userId}/media?${containerParams}`, 'POST');
     const containerId = containerRes.id;
     if (!containerId) throw new Error('No container ID returned');
 
-    // Step 2: Poll up to 18s for container to be ready
     if (isVideo) {
       let ready = false;
       for (let i = 0; i < 6; i++) {
@@ -133,9 +127,7 @@ exports.handler = async (event) => {
           if (e.message.includes('processing failed')) throw e;
         }
       }
-
       if (!ready) {
-        // Save container_id so next cycle can finish it
         await query(
           `UPDATE posts SET container_id = $2, caption = $3 WHERE id = $1`,
           [post.id, containerId, caption]
@@ -145,18 +137,14 @@ exports.handler = async (event) => {
       }
     }
 
-    // Step 3: Publish
     const publishRes = await igRequest(
       `/${userId}/media_publish?creation_id=${containerId}&access_token=${token}`,
       'POST'
     );
-
-    // Step 4: Update DB
     await query(
       `UPDATE posts SET status = 'posted', posted_at = NOW(), caption = $2, ig_post_id = $3, container_id = NULL WHERE id = $1`,
       [post.id, caption, publishRes.id || null]
     );
-
     console.log(`[auto-post] Successfully posted ${post.id} -> IG ${publishRes.id}`);
     return { statusCode: 200, body: JSON.stringify({ message: 'Posted', postId: post.id, igId: publishRes.id }) };
 
@@ -171,9 +159,7 @@ exports.handler = async (event) => {
           `UPDATE posts SET retry_count = retry_count + 1, error_message = $2, status = $3 WHERE id = $1`,
           [post.id, err.message.substring(0, 500), newStatus]
         );
-      } catch (dbErr) {
-        console.error('[auto-post] DB update failed:', dbErr.message);
-      }
+      } catch (dbErr) { console.error('[auto-post] DB update failed:', dbErr.message); }
     }
     return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
   }
@@ -188,17 +174,11 @@ async function analyzeFrame(imageUrl) {
     const payload = JSON.stringify({
       model: 'gpt-4o-mini',
       messages: [
-        {
-          role: 'system',
-          content: `You write Instagram Reels captions for @ascend.deals - a male self-improvement and deals account focused on looksmaxxing, skincare, grooming, and lifestyle products. RULES: - First line: short punchy hook under 10 words. Examples: "this is why you look the same", "stop skipping this", "the product nobody talks about", "POV: you finally found what works" - 1-2 lines of value/intrigue after - End with "link in bio" - Then 6-8 hashtags: mix #fyp #viral with niche tags - NO emojis. NO exclamation marks. Lowercase only - Sound like a real person, not a brand - Always include #ascenddeals`,
-        },
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: 'Identify the product or topic in this frame. Write a viral Reels caption with a scroll-stopping hook.' },
-            { type: 'image_url', image_url: { url: imageUrl, detail: 'low' } },
-          ],
-        },
+        { role: 'system', content: `You write Instagram Reels captions for @ascend.deals - a male self-improvement and deals account focused on looksmaxxing, skincare, grooming, and lifestyle products. RULES: - First line: short punchy hook under 10 words. Examples: "this is why you look the same", "stop skipping this", "the product nobody talks about", "POV: you finally found what works" - 1-2 lines of value/intrigue after - End with "link in bio" - Then 6-8 hashtags: mix #fyp #viral with niche tags - NO emojis. NO exclamation marks. Lowercase only - Sound like a real person, not a brand - Always include #ascenddeals` },
+        { role: 'user', content: [
+          { type: 'text', text: 'Identify the product or topic in this frame. Write a viral Reels caption with a scroll-stopping hook.' },
+          { type: 'image_url', image_url: { url: imageUrl, detail: 'low' } },
+        ]},
       ],
       max_tokens: 200,
       temperature: 0.85,
@@ -213,25 +193,25 @@ async function analyzeFrame(imageUrl) {
 
 function generateFallbackCaption() {
   const hooks = [
-    "this is why you look the same every month",
-    "stop skipping this in your routine",
-    "the one product that actually changed everything",
-    "nobody talks about this but it works",
-    "POV: you finally found what works",
-    "your routine is missing this one thing",
-    "the product everyone is sleeping on",
-    "this is what separates average from results",
+    'this is why you look the same every month',
+    'stop skipping this in your routine',
+    'the one product that actually changed everything',
+    'nobody talks about this but it works',
+    'POV: you finally found what works',
+    'your routine is missing this one thing',
+    'the product everyone is sleeping on',
+    'this is what separates average from results',
   ];
   const bodies = [
-    "most people overlook this. don't be most people.",
-    "the results speak for themselves.",
-    "once you try it you won't go back.",
-    "every detail matters when you're leveling up.",
+    'most people overlook this. don\'t be most people.',
+    'the results speak for themselves.',
+    'once you try it you won\'t go back.',
+    'every detail matters when you\'re leveling up.',
   ];
   const tagSets = [
-    "#looksmax #skincare #glowup #mog #ascenddeals #fyp #viral #selfcare",
-    "#looksmaxxing #grooming #selfimprovement #mog #ascenddeals #fyp #trending #skincare",
-    "#skincare #deals #glowup #ascenddeals #fyp #viral #routine #mog",
+    '#looksmax #skincare #glowup #mog #ascenddeals #fyp #viral #selfcare',
+    '#looksmaxxing #grooming #selfimprovement #mog #ascenddeals #fyp #trending #skincare',
+    '#skincare #deals #glowup #ascenddeals #fyp #viral #routine #mog',
   ];
   const h = hooks[Math.floor(Math.random() * hooks.length)];
   const b = bodies[Math.floor(Math.random() * bodies.length)];
@@ -245,15 +225,13 @@ function callOpenAI(apiKey, payload) {
       hostname: 'api.openai.com',
       path: '/v1/chat/completions',
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Length': Buffer.byteLength(payload),
-      },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`, 'Content-Length': Buffer.byteLength(payload) },
     }, (res) => {
       let data = '';
       res.on('data', c => { data += c; });
-      res.on('end', () => { try { resolve(JSON.parse(data)); } catch { reject(new Error('Bad OpenAI response')); } });
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); } catch { reject(new Error('Bad OpenAI response')); }
+      });
     });
     req.on('error', reject);
     req.setTimeout(20000, () => { req.destroy(); reject(new Error('OpenAI timeout')); });
