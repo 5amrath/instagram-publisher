@@ -8,12 +8,16 @@ import ProductResearch from './components/ProductResearch';
 import AITools from './components/AITools';
 import DailyPlanner from './components/DailyPlanner';
 import CreatorTracker from './components/CreatorTracker';
+import TikTokStudio from './components/TikTokStudio';
 
 const NAV_SECTIONS = [
   { label: 'PUBLISH', items: [
     { id: 'dashboard', label: 'Dashboard', icon: '⚡' },
     { id: 'upload', label: 'Upload', icon: '↑' },
     { id: 'history', label: 'History', icon: '⧖' },
+  ]},
+  { label: 'TIKTOK', items: [
+    { id: 'tiktok', label: 'TikTok Studio', icon: '🎥' },
   ]},
   { label: 'RESEARCH', items: [
     { id: 'products', label: 'Products', icon: '📦' },
@@ -69,6 +73,9 @@ export default function App() {
                   {item.id === 'upload' && bulkFiles.length > 0 && (
                     <span className="nav-badge">{bulkFiles.length > 99 ? '99+' : bulkFiles.length}</span>
                   )}
+                  {item.id === 'tiktok' && (
+                    <span className="nav-badge" style={{ background: 'var(--red-lt)', color: '#fff', fontSize: 8 }}>NEW</span>
+                  )}
                 </button>
               ))}
             </div>
@@ -102,6 +109,7 @@ export default function App() {
             />
           )}
           {tab === 'history' && <PostHistory showToast={showToast} />}
+          {tab === 'tiktok' && <TikTokStudio showToast={showToast} />}
           {tab === 'products' && <ProductResearch showToast={showToast} />}
           {tab === 'creators' && <CreatorTracker showToast={showToast} />}
           {tab === 'ai' && <AITools showToast={showToast} />}
