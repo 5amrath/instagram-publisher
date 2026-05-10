@@ -606,3 +606,78 @@ body {
 .stats-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 18px; }
 .stat-num { font-size: 26px; font-weight: 700; }
 .stat-label-sm { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 2px; }
+
+
+/* ── SETTINGS ── */
+.settings-sections { display: flex; flex-direction: column; gap: 10px; }
+.settings-row {
+  display: flex; align-items: center;
+  justify-content: space-between; gap: 16px;
+  padding: 13px 0; border-bottom: 1px solid var(--creme-border);
+}
+.settings-row:last-child { border-bottom: none; }
+.settings-row-label { font-size: 13px; font-weight: 600; color: var(--creme); margin-bottom: 2px; }
+.settings-row-desc { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; }
+.settings-row-right {
+  display: flex; align-items: center; gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ── UPLOAD / HISTORY ── */
+.upload-zone {
+  border: 2px dashed var(--charcoal-5);
+  border-radius: 12px; padding: 40px 20px;
+  text-align: center; cursor: pointer;
+  transition: all 0.15s; background: var(--charcoal-2);
+}
+.upload-zone:hover, .upload-zone.drag-over {
+  border-color: var(--gold-border); background: var(--gold-dim);
+}
+.upload-zone-icon { font-size: 36px; margin-bottom: 12px; opacity: 0.5; }
+.upload-zone-text { font-size: 14px; color: var(--text-muted); }
+.upload-zone-hint { font-size: 12px; color: var(--charcoal-6); margin-top: 4px; }
+
+.history-item {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--creme-border);
+  transition: background 0.1s;
+}
+.history-item:hover { background: var(--creme-hover); }
+.history-thumb {
+  width: 42px; height: 42px; border-radius: 8px;
+  object-fit: cover; flex-shrink: 0;
+  background: var(--charcoal-4);
+}
+.history-info { flex: 1; min-width: 0; }
+.history-caption {
+  font-size: 13px; color: var(--creme);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-bottom: 3px;
+}
+.history-meta-row { display: flex; gap: 10px; font-size: 11px; color: var(--text-muted); }
+.history-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* ── INLINE LABEL HACK ── */
+.inline-label {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+
+/* ── TAG ── */
+.tag {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 8px; border-radius: 5px;
+  font-size: 10.5px; font-weight: 600;
+  background: var(--charcoal-4); color: var(--text-muted);
+  border: 1px solid var(--creme-border);
+}
+
+/* ── STATS STRIP 4-COL VARIANT ── */
+.stats-strip.cols-4 { grid-template-columns: repeat(4, 1fr); }
+
+/* ── SCROLLABLE TABLE WRAPPER ── */
+.scrollable { overflow-x: auto; }
+
+/* Ensure stats-strip in Settings adapts */
+.card .stats-strip { margin-bottom: 0; border: none; border-radius: 8px; }
