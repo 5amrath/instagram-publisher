@@ -58,24 +58,22 @@ export default function PostComposer({ showToast, bulkFiles, setBulkFiles, bulkC
     });
   }, [setBulkFiles, showToast]);
 
-  const uploadToCloudinary = async (file) => {
+  // Upload via our backend Netlify function (uses server-side Cloudinary API key)
+  const uploadToBackend = async (file) => {
     const fd = new FormData();
     fd.append('file', file);
-    fd.append('upload_preset', 'instagram-publisher');
-    fd.append('resource_type', 'video');
-    const cloudName = 'degyziumu';
-    const res = await fetch('https://api.cloudinary.com/v1_1/' + cloudName + '/video/upload', { method: 'POST', body: fd });
+    const res = await fetch('/.netlify/functions/upload-media', { method: 'POST', body: fd });
     const data = await res.json();
-    if (!data.secure_url) throw new Error(data.error?.message || 'Upload failed');
-    return { videoUrl: data.secure_url, thumbUrl: data.eager?.[0]?.secure_url || null, publicId: data.public_id };
+    if (!res.ok || data.error) throw new Error(data.error || 'Upload failed');
+    return { videoUrl: data.videoUrl || data.url, thumbUrl: data.thumbnailUrl || null, publicId: data.publicId };
   };
 
   const handlePublishNow = async () => {
     if (!singleFile) { showToast('Select a video first', 'error'); return; }
     setPublishing(true);
     try {
-      const { videoUrl, thumbUrl } = await uploadToCloudinary(singleFile);
-      const res = await fetch('/.netlify/functions/publish-now', {
+      const { videoUrl, thumbUrl } = await uploadToBackend(singleFile);
+      const res = await fetch('/.netlify/functions/publish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ videoUrl, thumbUrl, caption }),
@@ -92,11 +90,11 @@ export default function PostComposer({ showToast, bulkFiles, setBulkFiles, bulkC
     if (!singleFile) { showToast('Select a video first', 'error'); return; }
     setQueuing(true);
     try {
-      const { videoUrl, thumbUrl } = await uploadToCloudinary(singleFile);
-      const res = await fetch('/.netlify/functions/add-to-queue', {
+      const { videoUrl, thumbUrl } = await uploadToBackend(singleFile);
+      const res = await fetch('/.netlify/functions/save-post', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ videoUrl, thumbUrl, caption }),
+        body: JSON.stringify({ videoUrl, thumbnailUrl: thumbUrl, caption, mediaType: 'VIDEO' }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
@@ -108,22 +106,29 @@ export default function PostComposer({ showToast, bulkFiles, setBulkFiles, bulkC
 
   const handleBulkUpload = async () => {
     if (bulkFiles.length === 0) { showToast('Add videos first', 'error'); return; }
-    setBulkProgress({ total: bulkFiles.length, done: 0, failed: 0, running: true });
-    let done = 0; let failed = 0;
-    for (const file of bulkFiles) {
-      try {
-        const { videoUrl, thumbUrl } = await uploadToCloudinary(file);
-        await fetch('/.netlify/functions/add-to-queue', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ videoUrl, thumbUrl, caption: bulkCaption }),
-        });
-        done++;
-      } catch { failed++; }
-      setBulkProgress({ total: bulkFiles.length, done, failed, running: true });
+    setBulkProgress({ total: bulkFiles.length, done: 0, failed: 0, active: true });
+    let done = 0, failed = 0;
+    const BATCH = 3;
+    for (let i = 0; i < bulkFiles.length; i += BATCH) {
+      const batch = bulkFiles.slice(i, i + BATCH);
+      await Promise.all(batch.map(async (file) => {
+        try {
+          const { videoUrl, thumbUrl } = await uploadToBackend(file);
+          await fetch('/.netlify/functions/save-post', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ videoUrl, thumbnailUrl: thumbUrl, caption: bulkCaption || '', mediaType: 'VIDEO' }),
+          });
+          done++;
+        } catch (e) {
+          failed++;
+          console.error('Upload failed:', file.name, e.message);
+        }
+        setBulkProgress(p => ({ ...p, done: p.done + 1 }));
+      }));
     }
-    setBulkProgress({ total: bulkFiles.length, done, failed, running: false });
-    showToast(done + ' videos queued' + (failed ? ', ' + failed + ' failed' : ''), done > 0 ? 'success' : 'error');
+    showToast(done + ' queued, ' + failed + ' failed', done > 0 ? 'success' : 'error');
+    setBulkProgress(p => ({ ...p, active: false }));
     if (done > 0) setBulkFiles([]);
   };
 
@@ -138,7 +143,8 @@ export default function PostComposer({ showToast, bulkFiles, setBulkFiles, bulkC
       <div style={{ display: 'flex', gap: 4, marginBottom: 18, background: 'var(--charcoal-3)', borderRadius: 9, padding: 3, width: 'fit-content' }}>
         {['single', 'bulk'].map(m => (
           <button key={m} onClick={() => setMode(m)} style={{
-            padding: '6px 20px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
+            padding: '6px 20px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 12.5,
+            fontWeight: 600, fontFamily: 'inherit',
             background: mode === m ? 'var(--charcoal-1)' : 'transparent',
             color: mode === m ? 'var(--creme)' : 'var(--text-muted)',
             transition: 'all 0.13s',
@@ -168,51 +174,66 @@ export default function PostComposer({ showToast, bulkFiles, setBulkFiles, bulkC
                 <video src={singlePreview} style={{ width: '100%', maxHeight: 260, objectFit: 'cover', borderRadius: 10 }} controls />
               ) : (
                 <>
-                  <div style={{ fontSize: 32, marginBottom: 10, opacity: 0.4 }}>↑</div>
-                  <div style={{ fontSize: 13, color: 'var(--creme)', fontWeight: 600 }}>Drop video or click to browse</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>MP4 · MOV · up to 500MB</div>
+                  <div style={{ fontSize: 32, marginBottom: 8 }}>🎥</div>
+                  <div style={{ color: 'var(--creme)', fontWeight: 600 }}>Drop video here</div>
+                  <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 4 }}>MP4 · MOV · WebM</div>
                 </>
               )}
             </div>
-            <input ref={singleRef} type="file" accept="video/*" style={{ display: 'none' }} onChange={e => handleSingleFile(e.target.files[0])} />
-            {singleFile && (
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10, display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '80%' }}>{singleFile.name}</span>
-                <span>{(singleFile.size / 1024 / 1024).toFixed(1)}MB</span>
+            <input ref={singleRef} type="file" accept="video/*" style={{ display: 'none' }} onChange={e => { const f = e.target.files?.[0]; if (f) handleSingleFile(f); }} />
+
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>CAPTION TEMPLATES</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                {Object.entries(CAPTION_TEMPLATES).map(([k, v]) => (
+                  <button key={k} onClick={() => setCaption(v)} style={{
+                    padding: '4px 10px', borderRadius: 6, border: '1px solid var(--charcoal-5)',
+                    background: 'transparent', color: 'var(--text-muted)', fontSize: 11, cursor: 'pointer',
+                  }}>{k}</button>
+                ))}
               </div>
-            )}
+            </div>
+
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>NICHE HASHTAGS</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                {Object.entries(NICHE_TAGS).map(([k, v]) => (
+                  <button key={k} onClick={() => setCaption(c => c + '\n' + v)} style={{
+                    padding: '4px 10px', borderRadius: 6, border: '1px solid var(--charcoal-5)',
+                    background: 'transparent', color: 'var(--gold)', fontSize: 11, cursor: 'pointer',
+                  }}>{k}</button>
+                ))}
+              </div>
+            </div>
           </div>
+
           <div>
-            <div className="section-label">Caption</div>
-            <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-              {Object.keys(NICHE_TAGS).map(k => (
-                <button key={k} className="pill" style={{ fontSize: 11 }} onClick={() => setCaption(c => c + (c ? '\n' : '') + NICHE_TAGS[k])}>{k}</button>
-              ))}
-            </div>
-            <div style={{ display: 'flex', gap: 6, marginBottom: 10, flexWrap: 'wrap' }}>
-              {Object.keys(CAPTION_TEMPLATES).map(k => (
-                <button key={k} className="pill" style={{ fontSize: 11, borderColor: 'var(--gold-border)', color: 'var(--gold-light)' }} onClick={() => setCaption(CAPTION_TEMPLATES[k])}>{k}</button>
-              ))}
-            </div>
+            <div style={{ marginBottom: 8, fontSize: 11, color: 'var(--text-muted)' }}>CAPTION</div>
             <textarea
               value={caption}
               onChange={e => setCaption(e.target.value)}
-              placeholder="Write a caption, or leave blank — AI will analyze the first frame and write one automatically..."
-              rows={6}
-              style={{ width: '100%', background: 'var(--charcoal-3)', border: '1px solid var(--creme-border)', borderRadius: 8, padding: '10px 12px', color: 'var(--creme)', fontSize: 13, fontFamily: 'inherit', resize: 'vertical', outline: 'none' }}
+              placeholder="Leave blank — AI generates from first frame"
+              style={{
+                width: '100%', minHeight: 220, background: 'var(--charcoal-2)', border: '1px solid var(--charcoal-5)',
+                borderRadius: 10, color: 'var(--creme)', padding: 12, fontSize: 13,
+                fontFamily: 'inherit', resize: 'vertical', boxSizing: 'border-box',
+              }}
             />
-            <div style={{ fontSize: 10, color: 'var(--text-muted)', textAlign: 'right', marginBottom: 14 }}>{caption.length} / 2200</div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button className="btn-primary" style={{ flex: 1 }} onClick={handlePublishNow} disabled={publishing || queuing || !singleFile}>
-                {publishing ? <><Spinner /> Publishing…</> : '⚡ Publish Now'}
-              </button>
-              <button className="btn-ghost" style={{ flex: 1 }} onClick={handleAddToQueue} disabled={publishing || queuing || !singleFile}>
-                {queuing ? <><Spinner /> Adding…</> : '+ Add to Queue'}
-              </button>
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <button onClick={handleAddToQueue} disabled={queuing || publishing} style={{
+                flex: 1, padding: '12px 0', background: 'var(--charcoal-3)', border: '1px solid var(--charcoal-5)',
+                borderRadius: 9, color: 'var(--creme)', fontWeight: 600, cursor: 'pointer', fontSize: 13,
+              }}>{queuing ? <Spinner /> : '⊕ Add to Queue'}</button>
+              <button onClick={handlePublishNow} disabled={queuing || publishing} style={{
+                flex: 1, padding: '12px 0', background: 'var(--gold)', border: 'none',
+                borderRadius: 9, color: '#1a1a1a', fontWeight: 700, cursor: 'pointer', fontSize: 13,
+              }}>{publishing ? <Spinner /> : '⚡ Post Now'}</button>
             </div>
-            <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
-              Leave caption blank — AI analyzes the first frame and writes a viral hook + hashtags
-            </p>
+            {singleFile && (
+              <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-muted)' }}>
+                {singleFile.name} — {(singleFile.size / 1024 / 1024).toFixed(1)} MB
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -226,76 +247,88 @@ export default function PostComposer({ showToast, bulkFiles, setBulkFiles, bulkC
             onClick={() => bulkRef.current?.click()}
             style={{
               border: '2px dashed ' + (bulkDrag ? 'var(--gold)' : 'var(--charcoal-5)'),
-              borderRadius: 14, padding: '50px 30px', textAlign: 'center', cursor: 'pointer',
-              background: bulkDrag ? 'var(--gold-dim)' : 'var(--charcoal-2)', transition: 'all 0.15s', marginBottom: 16,
+              borderRadius: 14, padding: '40px 20px', textAlign: 'center', cursor: 'pointer',
+              background: bulkDrag ? 'var(--gold-dim)' : 'var(--charcoal-2)',
+              transition: 'all 0.15s', marginBottom: 14, minHeight: 160,
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
             }}
           >
-            <div style={{ fontSize: 38, marginBottom: 12, opacity: 0.4 }}>📁</div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--creme)', marginBottom: 6 }}>
-              {bulkDrag ? 'Drop your folder here' : 'Drop a folder or videos'}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-              Drag an entire folder with 1000+ videos — all get queued automatically
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--charcoal-6)', marginTop: 6 }}>MP4 · MOV · WebM</div>
+            <div style={{ fontSize: 36, marginBottom: 10 }}>📂</div>
+            <div style={{ color: 'var(--creme)', fontWeight: 700, fontSize: 15 }}>Drop a folder or videos</div>
+            <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 5 }}>Drag an entire folder with 1000+ videos — all get queued automatically</div>
+            <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 3 }}>MP4 · MOV · WebM</div>
           </div>
-          <input ref={bulkRef} type="file" accept="video/*" multiple style={{ display: 'none' }} onChange={e => { const f = Array.from(e.target.files).filter(x => x.type.startsWith('video/')); setBulkFiles(prev => [...prev, ...f]); if (f.length) showToast(f.length + ' videos added', 'success'); }} />
+          <input ref={bulkRef} type="file" accept="video/*" multiple style={{ display: 'none' }} onChange={e => { const files = Array.from(e.target.files || []).filter(f => f.type.startsWith('video/')); setBulkFiles(prev => [...prev, ...files]); if (files.length) showToast(files.length + ' videos added', 'success'); }} />
 
           {bulkFiles.length > 0 && (
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <span className="section-label" style={{ margin: 0 }}>{bulkFiles.length} videos ready</span>
-                <button className="btn-sm" onClick={() => setBulkFiles([])} style={{ color: 'var(--red-lt)' }}>Clear all</button>
+            <div style={{ background: 'var(--charcoal-2)', borderRadius: 12, padding: 14, marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--creme)', letterSpacing: 1 }}>{bulkFiles.length} VIDEOS READY</span>
+                <button onClick={() => setBulkFiles([])} style={{ padding: '4px 12px', borderRadius: 6, border: '1px solid var(--charcoal-5)', background: 'transparent', color: 'var(--text-muted)', fontSize: 11, cursor: 'pointer' }}>Clear all</button>
               </div>
-              <div style={{ maxHeight: 180, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {bulkFiles.slice(0, 50).map((f, i) => (
-                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 8px', background: 'var(--charcoal-3)', borderRadius: 6 }}>
-                    <span style={{ fontSize: 12, color: 'var(--creme)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{f.name}</span>
-                    <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0, marginLeft: 8 }}>{(f.size/1024/1024).toFixed(1)}MB</span>
-                    <button onClick={() => setBulkFiles(prev => prev.filter((_, j) => j !== i))} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 14, marginLeft: 6, padding: '0 2px' }}>×</button>
+              {bulkFiles.slice(0, 5).map((f, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid var(--charcoal-4)', fontSize: 12 }}>
+                  <span style={{ color: 'var(--text-muted)', maxWidth: '70%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{(f.size / 1024 / 1024).toFixed(1)} MB</span>
+                    <button onClick={() => setBulkFiles(prev => prev.filter((_, j) => j !== i))} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 14 }}>×</button>
                   </div>
-                ))}
-                {bulkFiles.length > 50 && <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '4px 8px' }}>+ {bulkFiles.length - 50} more...</div>}
-              </div>
+                </div>
+              ))}
+              {bulkFiles.length > 5 && <div style={{ fontSize: 12, color: 'var(--text-muted)', paddingTop: 6 }}>+ {bulkFiles.length - 5} more...</div>}
             </div>
           )}
 
-          <div className="card" style={{ marginBottom: 14 }}>
-            <div className="section-label">Shared Caption (Optional)</div>
+          <div style={{ background: 'var(--charcoal-2)', borderRadius: 12, padding: 14, marginBottom: 14 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6, letterSpacing: 1 }}>SHARED CAPTION (OPTIONAL)</div>
             <textarea
               value={bulkCaption}
               onChange={e => setBulkCaption(e.target.value)}
               placeholder="Leave blank — AI auto-generates unique captions for each video from its first frame"
-              rows={3}
-              style={{ width: '100%', background: 'var(--charcoal-3)', border: '1px solid var(--creme-border)', borderRadius: 8, padding: '9px 12px', color: 'var(--creme)', fontSize: 13, fontFamily: 'inherit', resize: 'vertical', outline: 'none' }}
+              style={{
+                width: '100%', minHeight: 80, background: 'var(--charcoal-3)', border: '1px solid var(--charcoal-5)',
+                borderRadius: 8, color: 'var(--creme)', padding: 10, fontSize: 13,
+                fontFamily: 'inherit', resize: 'vertical', boxSizing: 'border-box',
+              }}
             />
           </div>
 
-          {bulkProgress.running && (
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                <span style={{ fontSize: 13, fontWeight: 600 }}>Uploading...</span>
-                <span style={{ fontSize: 13, color: 'var(--gold-light)', fontVariantNumeric: 'tabular-nums' }}>{bulkProgress.done}/{bulkProgress.total}</span>
+          {bulkProgress.active && (
+            <div style={{ background: 'var(--charcoal-2)', borderRadius: 12, padding: 14, marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: 12 }}>
+                <span style={{ color: 'var(--creme)' }}>Uploading... {bulkProgress.done}/{bulkProgress.total}</span>
+                <span style={{ color: 'var(--gold)' }}>{pct}%</span>
               </div>
-              <div style={{ height: 6, background: 'var(--charcoal-4)', borderRadius: 99, overflow: 'hidden' }}>
-                <div style={{ height: '100%', width: pct + '%', background: 'linear-gradient(90deg, var(--gold), var(--gold-light))', borderRadius: 99, transition: 'width 0.3s ease' }} />
+              <div style={{ background: 'var(--charcoal-4)', borderRadius: 4, height: 6, overflow: 'hidden' }}>
+                <div style={{ width: pct + '%', height: '100%', background: 'var(--gold)', transition: 'width 0.3s', borderRadius: 4 }} />
               </div>
-              {bulkProgress.failed > 0 && <div style={{ fontSize: 11, color: 'var(--red-lt)', marginTop: 6 }}>{bulkProgress.failed} failed</div>}
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 5 }}>{bulkProgress.failed > 0 ? bulkProgress.failed + ' failed' : 'Uploading to cloud, then saving to queue...'}</div>
             </div>
           )}
 
-          {!bulkProgress.running && bulkProgress.total > 0 && !bulkProgress.running && (
-            <div style={{ fontSize: 13, color: bulkProgress.failed > 0 ? 'var(--gold-light)' : 'var(--emerald-lt)', marginBottom: 14, fontWeight: 600 }}>
-              ✓ {bulkProgress.done} videos queued successfully{bulkProgress.failed > 0 ? ' · ' + bulkProgress.failed + ' failed' : ''}
+          {!bulkProgress.active && bulkProgress.total > 0 && (
+            <div style={{ padding: '8px 12px', borderRadius: 8, background: bulkProgress.failed === bulkProgress.total ? 'rgba(255,80,80,0.1)' : 'rgba(100,200,100,0.1)', marginBottom: 12, fontSize: 13 }}>
+              <span style={{ color: bulkProgress.done > 0 ? '#6dc878' : '#ff5050' }}>
+                ✓ {bulkProgress.done} videos queued successfully · {bulkProgress.failed} failed
+              </span>
             </div>
           )}
 
-          <button className="btn-primary" style={{ width: '100%', padding: '12px', fontSize: 14 }} onClick={handleBulkUpload} disabled={bulkProgress.running || bulkFiles.length === 0}>
-            {bulkProgress.running ? <><Spinner /> Uploading {bulkProgress.done}/{bulkProgress.total}…</> : '🚀 Upload & Queue ' + (bulkFiles.length > 0 ? bulkFiles.length + ' Videos' : 'All Videos')}
+          <button
+            onClick={handleBulkUpload}
+            disabled={bulkProgress.active || bulkFiles.length === 0}
+            style={{
+              width: '100%', padding: '14px 0', background: bulkFiles.length === 0 ? 'var(--charcoal-4)' : 'var(--gold)',
+              border: 'none', borderRadius: 10, color: bulkFiles.length === 0 ? 'var(--text-muted)' : '#1a1a1a',
+              fontWeight: 700, fontSize: 14, cursor: bulkFiles.length === 0 ? 'not-allowed' : 'pointer',
+              transition: 'all 0.15s', fontFamily: 'inherit',
+            }}
+          >
+            {🚀} Upload & Queue {bulkFiles.length > 0 ? bulkFiles.length : 'All'} Videos
           </button>
-          <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, textAlign: 'center' }}>
+          <div style={{ textAlign: 'center', fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
             Videos upload to cloud, then queue for auto-scheduling · AI writes captions from first frame
-          </p>
+          </div>
         </div>
       )}
     </div>
