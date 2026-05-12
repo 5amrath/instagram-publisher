@@ -324,7 +324,7 @@ export default function PostComposer({ showToast, bulkFiles, setBulkFiles, bulkC
               transition: 'all 0.15s', fontFamily: 'inherit',
             }}
           >
-            {🚀} Upload & Queue {bulkFiles.length > 0 ? bulkFiles.length : 'All'} Videos
+            '🚀 Upload & Queue ' + (bulkFiles.length > 0 ? bulkFiles.length + ' Videos' : 'All Videos')
           </button>
           <div style={{ textAlign: 'center', fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
             Videos upload to cloud, then queue for auto-scheduling · AI writes captions from first frame
